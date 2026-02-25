@@ -1,0 +1,11 @@
+# Scratch / backup configs
+default.conf
+new.conf
+kitty-prev-*.conf
+font-[0-9]*.conf
+
+# Fragment not included by kitty.conf
+font-symbol-map.conf
+
+# Python type checker cache
+.pyre/
