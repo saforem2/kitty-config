@@ -1,10 +1,6 @@
-import json
-import subprocess
-from collections import defaultdict
 from datetime import datetime, timezone
 
-from kitty.boss import get_boss
-from kitty.fast_data_types import Screen, add_timer
+from kitty.fast_data_types import Screen
 from kitty.rgb import Color
 from kitty.tab_bar import (
     DrawData,
@@ -17,37 +13,21 @@ from kitty.tab_bar import (
 )
 from kitty.utils import color_as_int
 
-timer_id = None
-
-ICON = "  "
+ICON = "  "
 RIGHT_MARGIN = 1
-REFRESH_TIME = 15
 
 icon_fg = as_rgb(color_as_int(Color(255, 250, 205)))
 icon_bg = as_rgb(color_as_int(Color(47, 61, 68)))
-bat_text_color = as_rgb(0x999F93)
 clock_color = as_rgb(0x7FBBB3)
-dnd_color = as_rgb(0x465258)
-sep_color = as_rgb(0x999F93)
 utc_color = as_rgb(color_as_int(Color(113, 115, 116)))
 
 
-def calc_draw_spaces(*args) -> int:
-    length = 0
-    for i in args:
-        if not isinstance(i, str):
-            i = str(i)
-        length += len(i)
-    return length
-
-
-def _draw_icon(screen: Screen, index: int) -> int:
+def _draw_icon(screen: Screen) -> int:
     fg, bg = screen.cursor.fg, screen.cursor.bg
     screen.cursor.fg = icon_fg
     screen.cursor.bg = icon_bg
     screen.draw(ICON)
     screen.cursor.fg, screen.cursor.bg = fg, bg
-    screen.cursor.x += len(ICON)
     return screen.cursor.x
 
 
@@ -83,31 +63,23 @@ def _draw_left_status(
     return end
 
 
-
 def _draw_right_status(screen: Screen) -> int:
     draw_attributed_string(Formatter.reset, screen)
 
-    clock = datetime.now().strftime("%H:%M")
-    utc = datetime.now(timezone.utc).strftime(" (UTC %H:%M)")
+    now_utc = datetime.now(timezone.utc)
+    clock_text = now_utc.astimezone().strftime("%H:%M")
+    utc_text = now_utc.strftime(" (UTC %H:%M)")
 
-    cells = []
+    total_len = len(clock_text) + len(utc_text) + RIGHT_MARGIN
 
-    cells.append((clock_color, clock))
-    cells.append((utc_color, utc))
-
-    right_status_length = RIGHT_MARGIN
-    for cell in cells:
-        right_status_length += len(str(cell[1]))
-
-    draw_spaces = screen.columns - screen.cursor.x - right_status_length
-
+    draw_spaces = screen.columns - screen.cursor.x - total_len
     if draw_spaces > 0:
         screen.draw(" " * draw_spaces)
 
-    screen.cursor.fg = 0
-    for color, status in cells:
-        screen.cursor.fg = color
-        screen.draw(status)
+    screen.cursor.fg = clock_color
+    screen.draw(clock_text)
+    screen.cursor.fg = utc_color
+    screen.draw(utc_text)
     screen.cursor.bg = 0
 
     return screen.cursor.x
@@ -124,11 +96,9 @@ def draw_tab(
     extra_data: ExtraData,
 ) -> int:
 
-    # Only draw the icon for the first tab
     if index == 0:
-        _draw_icon(screen, index)
+        _draw_icon(screen)
 
-    # Draw the left status for each tab
     end = _draw_left_status(
         draw_data,
         screen,
@@ -140,9 +110,7 @@ def draw_tab(
         extra_data,
     )
 
-    # Draw the right status only for the last tab, without creating a new tab
     if is_last:
-        screen.cursor.x = screen.columns - RIGHT_MARGIN
         _draw_right_status(screen)
 
     return end
