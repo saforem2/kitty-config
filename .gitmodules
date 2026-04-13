@@ -1,0 +1,8 @@
+[submodule "kitty_config"]
+	path = kitty_config
+	url = https://github.com/saforem2/kitty_config.git
+	branch = sam/local-changes
+[submodule "kitty_search"]
+	path = kitty_search
+	url = https://github.com/saforem2/kitty-kitten-search.git
+	branch = sam/local-changes
