@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Rewrite herdr's [theme.custom] block to mirror the kitty light/dark theme.
+
+Usage: herdr-theme {dark|light} [--config PATH] [--print]
+
+herdr accepts hex / named / rgb() colors only, but the kitty themes are
+authored in OKLCH -- so the values are converted here.
+
+Only the [theme.custom] block and the `name` key inside [theme] are touched;
+every other line of config.toml is preserved byte for byte, because that file
+also holds keybindings and plugin settings.
+
+The 16 token names below are herdr's CustomThemeColors fields. They are
+Catppuccin-flavoured; a token not in this list is silently ignored by herdr
+(its config check does not validate them), so do not invent new ones.
+"""
+
+import argparse
+import math
+import os
+import re
+import sys
+
+# herdr's CustomThemeColors fields, in declaration order.
+TOKENS = [
+    "accent", "panel_bg", "surface0", "surface1", "surface_dim",
+    "overlay0", "overlay1", "text", "subtext0", "mauve", "green",
+    "yellow", "red", "blue", "teal", "peach",
+]
+
+KITTY_DIR = os.path.dirname(os.path.abspath(__file__))
+BEGIN = "# >>> kitty-sync >>>"
+END = "# <<< kitty-sync <<<"
+
+
+def oklch_to_hex(L, C, H):
+    """OKLCH -> sRGB hex. Values outside sRGB gamut are clipped per channel."""
+    h = math.radians(H)
+    a, b = C * math.cos(h), C * math.sin(h)
+    l_ = L + 0.3963377774 * a + 0.2158037573 * b
+    m_ = L - 0.1055613458 * a - 0.0638541728 * b
+    s_ = L - 0.0894841775 * a - 1.2914855480 * b
+    l, m, s = l_ ** 3, m_ ** 3, s_ ** 3
+    r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
+    g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
+    bl = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+
+    def enc(u):
+        u = 12.92 * u if u <= 0.0031308 else 1.055 * (max(u, 0) ** (1 / 2.4)) - 0.055
+        return max(0, min(255, round(u * 255)))
+
+    return "#{:02x}{:02x}{:02x}".format(enc(r), enc(g), enc(bl))
+
+
+def _lum(h):
+    h = h.lstrip("#")
+    ch = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    ch = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in ch]
+    return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
+
+
+def contrast(a, b):
+    l1, l2 = sorted((_lum(a), _lum(b)), reverse=True)
+    return (l1 + 0.05) / (l2 + 0.05)
+
+
+def mix(a, b, t):
+    a, b = a.lstrip("#"), b.lstrip("#")
+    return "#" + "".join(
+        f"{round(int(a[i:i+2], 16) * (1 - t) + int(b[i:i+2], 16) * t):02x}"
+        for i in (0, 2, 4)
+    )
+
+
+def at_contrast(bg, fg, target):
+    """Blend bg toward fg until it hits `target` contrast against bg.
+
+    Deriving the greys this way (rather than borrowing kitty's ANSI color8/
+    color0) is what keeps them legible: ANSI 'bright black' is near-invisible
+    on a near-black panel -- measured 1.16:1, well under the 4.5:1 needed for
+    body text.
+    """
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if contrast(mix(bg, fg, mid), bg) < target:
+            lo = mid
+        else:
+            hi = mid
+    return mix(bg, fg, hi)
+
+
+def parse_color(v):
+    v = v.strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", v):
+        return v.lower()
+    m = re.match(r"oklch\(\s*([0-9.]+)(%?)\s+([0-9.]+)\s+([0-9.]+)\s*\)", v)
+    if not m:
+        return None
+    L = float(m.group(1))
+    if m.group(2):  # percentage form
+        L /= 100
+    return oklch_to_hex(L, float(m.group(3)), float(m.group(4)))
+
+
+def load_kitty_theme(mode):
+    path = os.path.join(KITTY_DIR, "themes", f"theme-{mode}.conf")
+    if not os.path.exists(path):
+        sys.exit(f"herdr-theme: missing kitty theme: {path}")
+    colors = {}
+    for line in open(path, encoding="utf-8"):
+        line = line.split("#!")[0]
+        m = re.match(r"^\s*([a-z_0-9]+)\s+(.+?)\s*$", line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2)
+        # skip comment lines, but keep bare hex values
+        if val.lstrip().startswith("#") and not re.fullmatch(r"#[0-9a-fA-F]{6}", val.strip()):
+            continue
+        hexval = parse_color(val)
+        if hexval:
+            colors[key] = hexval
+    return colors
+
+
+def build_palette(mode):
+    """Map kitty color roles onto herdr's token names."""
+    k = load_kitty_theme(mode)
+    required = ["background", "foreground", "active_border_color"]
+    missing = [r for r in required if r not in k]
+    if missing:
+        sys.exit(f"herdr-theme: {mode} theme missing required keys: {', '.join(missing)}")
+
+    def c(name, fallback):
+        return k.get(name, k.get(fallback, "#808080"))
+
+    bg, fg = k["background"], k["foreground"]
+
+    # Surfaces and muted text are DERIVED from a bg->fg blend at fixed contrast
+    # targets, not taken from kitty's ANSI palette. ANSI color8/color0 sit at
+    # ~1.2:1 on this background -- unreadable. See at_contrast().
+    #
+    #   surface0/1  panel fills + the active-row highlight. surface1 must stay
+    #               distinctly brighter than surface0 or the selected workspace
+    #               is impossible to pick out.
+    #   overlay0    dimmest text that still has to be READ (WCAG AA = 4.5:1).
+    #   subtext0    secondary text; sits between overlay1 and text.
+    #
+    # subtext0's target is clamped so it can't collide with text on themes
+    # whose foreground contrast is modest (the light theme's fg is only 8:1).
+    fg_cr = contrast(fg, bg)
+    sub_target = min(8.0, fg_cr * 0.75)
+
+    # accent is kitty's active-border color, but herdr also draws it as TEXT.
+    # On the light theme that pink is only 3.62:1 -- fine for a 1px border,
+    # under AA for a label -- so darken toward the foreground just enough to
+    # clear 4.5:1. Hue is preserved; on the dark theme this is a no-op.
+    def legible(color):
+        """Nudge a hue toward the foreground until it clears WCAG AA (4.5:1).
+
+        Bright ANSI colors are low-contrast on a white panel -- the light
+        theme's yellow measures 2.18:1 -- so any of them used as text needs
+        deepening. Hue is preserved; colors already at AA pass through
+        unchanged, which makes this close to a no-op on the dark theme.
+        """
+        if contrast(color, bg) >= 4.5:
+            return color
+        for i in range(1, 41):
+            candidate = mix(color, fg, i / 40)
+            if contrast(candidate, bg) >= 4.5:
+                return candidate
+        return fg
+
+    accent = legible(k["active_border_color"])
+
+    return {
+        "accent":      accent,
+        "panel_bg":    bg,
+        "surface0":    at_contrast(bg, fg, 1.25),
+        "surface1":    at_contrast(bg, fg, 1.9),
+        "surface_dim": at_contrast(bg, fg, 1.08),
+        "overlay0":    at_contrast(bg, fg, 4.5),
+        "overlay1":    at_contrast(bg, fg, 6.0),
+        "text":        fg,
+        "subtext0":    at_contrast(bg, fg, sub_target),
+        "mauve":       legible(c("color5", "color13")),
+        "green":       legible(c("color2", "color10")),
+        "yellow":      legible(c("color3", "color11")),
+        "red":         legible(c("color1", "color9")),
+        "blue":        legible(c("color4", "color12")),
+        "teal":        legible(c("color6", "color14")),
+        "peach":       legible(c("color11", "color3")),
+    }
+
+
+def render_block(mode, palette):
+    lines = [
+        BEGIN,
+        f"# Generated by herdr-theme from kitty themes/theme-{mode}.conf -- do not hand-edit.",
+        "# Regenerate:  ~/.config/kitty/herdr-theme {dark|light}",
+        "[theme.custom]",
+    ]
+    lines += [f'{t} = "{palette[t]}"' for t in TOKENS]
+    lines.append(END)
+    return "\n".join(lines)
+
+
+def apply(config_path, mode, palette, do_print):
+    block = render_block(mode, palette)
+    if do_print:
+        print(block)
+        return False
+
+    if not os.path.exists(config_path):
+        sys.exit(f"herdr-theme: no config at {config_path}")
+    text = open(config_path, encoding="utf-8").read()
+
+    # Replace our managed block if present, else append it.
+    pattern = re.compile(
+        re.escape(BEGIN) + r".*?" + re.escape(END), re.S
+    )
+    if pattern.search(text):
+        new = pattern.sub(lambda _: block, text)
+    else:
+        # Guard: an unmanaged hand-written [theme.custom] would collide with ours.
+        if re.search(r"^\s*\[theme\.custom\]", text, re.M):
+            sys.exit(
+                "herdr-theme: config.toml already has a hand-written [theme.custom].\n"
+                "Remove or comment it out first -- refusing to create a duplicate section."
+            )
+        new = text.rstrip("\n") + "\n\n" + block + "\n"
+
+    if new == text:
+        return False
+    tmp = config_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(new)
+    os.replace(tmp, config_path)
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("mode", choices=["dark", "light"])
+    ap.add_argument("--config",
+                    default=os.path.expanduser("~/.config/herdr/config.toml"))
+    ap.add_argument("--print", dest="do_print", action="store_true",
+                    help="print the block instead of writing it")
+    args = ap.parse_args()
+
+    palette = build_palette(args.mode)
+    changed = apply(args.config, args.mode, palette, args.do_print)
+    if changed:
+        print(f"herdr-theme: applied {args.mode} palette")
+
+
+if __name__ == "__main__":
+    main()
