@@ -1,0 +1,158 @@
+#!/usr/bin/env zsh
+# Regenerate the in-section "unset options" reference blocks inside kitty.conf.
+#
+# For each `#: <Section> {{{` fold, appends a region listing every kitty option
+# belonging to that section that is NOT set anywhere in the config, commented
+# out, with its default value and kitty's own help text. Each region is
+# delimited by:
+#     #: --- unset in this section (kitty defaults, commented) ---
+#     #: --- end unset ---
+# and is replaced wholesale on each run; everything outside the markers is left
+# untouched, so hand edits are safe.
+#
+# The option list comes from the RUNNING kitty binary (kitty.options.definition)
+# rather than the docs, so it cannot drift from the installed version. Re-run
+# after upgrading kitty.
+#
+# Both theme files are unioned when deciding what counts as "set": theme-dark
+# sets 13 options theme-light does not, so reading only the active theme would
+# make the output depend on whether it is light or dark right now.
+#
+#   ./gen-unset-sections
+set -euo pipefail
+cd "${0:a:h}"
+
+py=$(mktemp -t genmissing.XXXXXX.py)
+trap 'rm -f "$py"' EXIT
+
+cat > "$py" <<'PY'
+import os, re
+from kitty.options.definition import definition
+from kitty.constants import str_version
+
+CFG = os.path.expanduser("~/.config/kitty")
+TARGET = os.path.realpath(os.path.join(CFG, "kitty.conf"))
+BEGIN_T = "#: --- unset in this section (kitty defaults, commented) ---"
+END_T   = "#: --- end unset ---"
+
+all_opts = {}
+for o in definition.iter_all_non_groups():
+    if hasattr(o, "name") and hasattr(o, "defval_as_string"):
+        all_opts[o.name] = o
+
+src = open(TARGET).read().split("\n")
+
+# Which options are genuinely set? Skip our own generated regions.
+setopts = set()
+inside = False
+for l in src:
+    if l.startswith(BEGIN_T): inside = True; continue
+    if l.startswith(END_T):   inside = False; continue
+    if inside: continue
+    t = l.strip()
+    if t and not t.startswith("#"):
+        k = t.split(None, 1)[0]
+        if k in all_opts: setopts.add(k)
+# Union both themes so the result never depends on light/dark at run time.
+for th in ("theme-dark.conf", "theme-light.conf"):
+    p = os.path.join(CFG, "themes", th)
+    if os.path.exists(p):
+        for l in open(p, errors="replace"):
+            t = l.strip()
+            if t and not t.startswith("#"):
+                k = t.split(None, 1)[0]
+                if k in all_opts: setopts.add(k)
+
+bulk = re.compile(r"color(1[6-9]|[2-9]\d|1\d\d|2[0-4]\d|25[0-5])$")
+by_group = {}
+for name, o in all_opts.items():
+    if name in setopts or bulk.fullmatch(name): continue
+    g = getattr(o, "group", None)
+    t = str(getattr(g, "title", None) or getattr(g, "name", "?"))
+    by_group.setdefault(t, []).append(o)
+
+# Strip any previously generated regions.
+clean, inside = [], False
+for l in src:
+    if l.startswith(BEGIN_T):
+        inside = True
+        # Also drop the blank padding line we emitted just before the marker,
+        # otherwise two blanks accumulate per region on every run.
+        while clean and clean[-1].strip() == "":
+            clean.pop()
+        continue
+    if l.startswith(END_T):
+        inside = False
+        skip_blank = True
+        continue
+    if not inside:
+        if 'skip_blank' in dir() and skip_blank and l.strip() == "":
+            skip_blank = False
+            continue
+        skip_blank = False
+        clean.append(l)
+src = clean
+
+# Locate each section's fold open, and its matching close.
+opens = {}
+# Our section headings do not all match kitty's group titles verbatim.
+ALIAS = {"Font Specification": "Fonts"}
+for i, l in enumerate(src):
+    m = re.match(r"^#: (.+?) \{\{\{\s*$", l)
+    if m:
+        t = m.group(1).strip()
+        opens.setdefault(ALIAS.get(t, t), i)
+
+placed, unplaced = [], []
+for gname, items in by_group.items():
+    if gname in opens: placed.append((opens[gname], gname, items))
+    else: unplaced.append((gname, items))
+
+# Insert bottom-up so earlier indices stay valid.
+for idx, gname, items in sorted(placed, key=lambda x: -x[0]):
+    j = idx + 1
+    depth = 1
+    while j < len(src) and depth:
+        if re.search(r"\{\{\{\s*$", src[j]): depth += 1
+        elif re.match(r"^#: \}\}\}", src[j]): depth -= 1
+        if depth == 0: break
+        j += 1
+    ins = j if depth == 0 else len(src)
+    block = [BEGIN_T, ""]
+    for o in sorted(items, key=lambda x: x.name):
+        for line in o.as_conf(commented=True):
+            t = line.rstrip()
+            if not t: block.append("")
+            elif t.lstrip().startswith("#"): block.append(t)
+            else: block.append("# " + t)      # as_conf emits a LIVE line
+        block.append("")
+    block.append(END_T)
+    src[ins:ins] = [""] + block + [""]
+
+print(f"placed {len(placed)} groups into their sections")
+for g, i in unplaced: print(f"  UNPLACED (no matching section): {g} ({len(i)})")
+open(TARGET, "w").write("\n".join(src))
+
+PY
+
+kitty +runpy "$(cat "$py")"
+
+# Fail loudly if any line would actually SET something.
+# Fail loudly if any line INSIDE a generated region would actually set something.
+python3 - <<'CHK' || exit 1
+import sys
+B="#: --- unset in this section"; E="#: --- end unset ---"
+bad=[]; inside=False; regions=0
+for i,l in enumerate(open("kitty.conf"),1):
+    t=l.rstrip()
+    if t.startswith(B): inside=True; regions+=1; continue
+    if t.startswith(E): inside=False; continue
+    if inside:
+        u=t.strip()
+        if u and not u.startswith("#"): bad.append((i,u))
+if bad:
+    print("ERROR: active settings inside generated regions:", file=sys.stderr)
+    for i,u in bad[:20]: print(f"  line {i}: {u}", file=sys.stderr)
+    sys.exit(1)
+print(f"verified: {regions} generated regions, 0 active lines inside")
+CHK
