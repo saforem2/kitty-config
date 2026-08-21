@@ -23,7 +23,7 @@ import sys
 
 # herdr's CustomThemeColors fields, in declaration order.
 TOKENS = [
-    "accent", "panel_bg", "surface0", "surface1", "surface_dim",
+    "accent", "panel_bg", "sidebar_bg", "surface0", "surface1", "surface_dim",
     "overlay0", "overlay1", "text", "subtext0", "mauve", "green",
     "yellow", "red", "blue", "teal", "peach",
 ]
@@ -120,6 +120,10 @@ def load_kitty_theme(mode):
         hexval = parse_color(val)
         if hexval:
             colors[key] = hexval
+            # Keep the authored string too: the OKLCH form carries chroma/hue
+            # that the hex round-trip preserves but that is awkward to recover.
+            # accent darkening needs it (see ACTIVE_MIN).
+            colors["__raw__" + key] = val.strip()
     return colors
 
 
@@ -171,13 +175,55 @@ def build_palette(mode):
                 return candidate
         return fg
 
+    # accent is also the ACTIVE pane border, and that is the main focus cue.
+    # `legible` only guarantees 4.5:1 (AA for text), which on the light theme
+    # left the pink at 4.54 against an inactive border of 1.91 -- a 2.4x split,
+    # versus 8x on dark, so the focused pane barely stood out. Push it further
+    # for the border role. Hue is preserved; the dark theme's yellow already
+    # measures 15.4:1 so this is a no-op there.
+    ACTIVE_MIN = 6.5
     accent = legible(k["active_border_color"])
+    if contrast(accent, bg) < ACTIVE_MIN:
+        # Darken in OKLCH rather than blending toward `fg`. A plain mix() drags
+        # the hue toward the text colour and washes the chroma out -- on the
+        # light theme it took the pink from 72% to 46% saturation, visibly
+        # muddy. Dropping L while holding C and H keeps it vivid.
+        src = k.get("__raw__active_border_color", "")
+        m = re.match(r"oklch\(\s*([0-9.]+)(%?)\s+([0-9.]+)\s+([0-9.]+)\s*\)", src.strip())
+        if m:
+            L0 = float(m.group(1)) / (100 if m.group(2) else 1)
+            C0, H0 = float(m.group(3)), float(m.group(4))
+            darker = L0 > 0.5   # light panel -> go down; dark panel -> go up
+            for step in range(1, 61):
+                L = L0 + (-step if darker else step) * 0.01
+                if not 0.0 <= L <= 1.0:
+                    break
+                cand = oklch_to_hex(L, C0, H0)
+                if contrast(cand, bg) >= ACTIVE_MIN:
+                    accent = cand
+                    break
+        else:
+            for i in range(1, 61):
+                cand = mix(accent, fg, i / 60)
+                if contrast(cand, bg) >= ACTIVE_MIN:
+                    accent = cand
+                    break
 
     return {
         "accent":      accent,
         "panel_bg":    bg,
+        # sidebar_bg: recessed relative to the panel so the spaces list reads as
+        # chrome rather than content. On dark that means slightly lighter than
+        # the near-black bg (pure-black-on-black is invisible); on light,
+        # slightly darker than white. Kept below surface0 so an active row still
+        # lifts off it.
+        "sidebar_bg":  at_contrast(bg, fg, 1.06),
         "surface0":    at_contrast(bg, fg, 1.25),
-        "surface1":    at_contrast(bg, fg, 1.9),
+        # surface1 doubles as the INACTIVE pane border. Held deliberately low so
+        # the gap to `accent` (the active border) is wide: at 1.9 the light
+        # theme separated active from inactive by only 2.4x, versus 8x on dark,
+        # which made the focused pane hard to spot. See ACTIVE_MIN below.
+        "surface1":    at_contrast(bg, fg, 1.55),
         "surface_dim": at_contrast(bg, fg, 1.08),
         "overlay0":    at_contrast(bg, fg, 4.5),
         "overlay1":    at_contrast(bg, fg, 6.0),

@@ -1,0 +1,58 @@
+#!/usr/bin/env zsh
+# Regenerate the emoji symbol_map line in kitty.conf.
+#
+# WHY THIS EXISTS: Apple Color Emoji's metrics are too tall for a cell sized by
+# Iosevka Condensed (at font_size 14: ascent 17.5 + descent 5.5 = 23px into an
+# 18px cell), so emoji render clipped top and bottom. kitty cannot scale a
+# fallback font independently -- there is no per-symbol_map size and no
+# per-font font_size -- so the fix is to route emoji to Noto Color Emoji,
+# whose metrics fit.
+#
+# WHY IT IS GENERATED: hand-picking Unicode blocks does not work. U+2600-U+27BF
+# is mixed -- real emoji (U+2705 checkmark, U+274C cross, U+26A1 high voltage,
+# U+2728 sparkles) sit right beside text symbols (U+276F angle quote, U+2713
+# check) that Nerd Font prompts and TUIs draw with. Mapping the whole block
+# breaks the symbols; skipping it leaves those emoji clipped. Querying
+# Unicode's own Emoji_Presentation property splits them exactly.
+#
+#   ./gen-emoji-symbol-map
+set -euo pipefail
+cd "${0:a:h}"
+
+ranges=$(kitty +runpy '
+from kitty.fast_data_types import char_props_for
+hits=[]
+for cp in list(range(0x2000,0x3300)) + list(range(0x1F000,0x1FBFF)):
+    try: q = char_props_for(chr(cp))
+    except Exception: continue
+    if q.get("is_emoji") and q.get("is_emoji_presentation_base") and q.get("width")==2:
+        hits.append(cp)
+out=[]
+for x in hits:
+    if out and x==out[-1][1]+1: out[-1][1]=x
+    else: out.append([x,x])
+print(",".join(f"U+{a:04X}-U+{b:04X}" if a!=b else f"U+{a:04X}" for a,b in out))
+' | tail -1)
+
+[[ $ranges == U+* ]] || { print -u2 "ERROR: bad range output: ${ranges:0:60}"; exit 1; }
+
+python3 - "$ranges" <<'PY'
+import sys
+r = sys.argv[1].strip()
+p = "kitty.conf"
+lines = open(p).read().split("\n")
+idx = [i for i, l in enumerate(lines) if l.startswith("symbol_map ") and "Noto Color Emoji" in l]
+if len(idx) != 1:
+    raise SystemExit(f"ERROR: expected exactly 1 emoji symbol_map line, found {len(idx)}")
+lines[idx[0]] = "symbol_map " + r + " Noto Color Emoji"
+open(p, "w").write("\n".join(lines))
+print(f"symbol_map updated: {r.count(',')+1} ranges")
+PY
+
+# Sanity: text symbols must NOT be inside the mapped set.
+kitty +runpy '
+from kitty.fast_data_types import char_props_for
+bad=[c for c in "❯✓→●○│─" 
+     if char_props_for(c).get("is_emoji") and char_props_for(c).get("width")==2]
+print("ERROR: text symbols captured: "+repr(bad) if bad else "verified: text symbols excluded")
+'
