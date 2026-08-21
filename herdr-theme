@@ -4,7 +4,8 @@
 Usage: herdr-theme {dark|light} [--config PATH] [--print]
 
 herdr accepts hex / named / rgb() colors only, but the kitty themes are
-authored in OKLCH -- so the values are converted here.
+authored in OKLCH -- conversion and the contrast helpers live in
+kitty_colors.py, shared with leaf-theme.
 
 Only the [theme.custom] block and the `name` key inside [theme] are touched;
 every other line of config.toml is preserved byte for byte, because that file
@@ -16,10 +17,16 @@ Catppuccin-flavoured; a token not in this list is silently ignored by herdr
 """
 
 import argparse
-import math
 import os
 import re
 import sys
+
+# realpath: this script is also symlinked into ~/.config/kitty, and abspath
+# would not resolve that, leaving kitty_colors unimportable from the link.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from kitty_colors import (  # noqa: E402
+    at_contrast, contrast, deepen, legible as _legible, load_kitty_theme,
+)
 
 # herdr's CustomThemeColors fields, in declaration order.
 TOKENS = [
@@ -28,108 +35,13 @@ TOKENS = [
     "yellow", "red", "blue", "teal", "peach",
 ]
 
-KITTY_DIR = os.path.dirname(os.path.abspath(__file__))
 BEGIN = "# >>> kitty-sync >>>"
 END = "# <<< kitty-sync <<<"
 
 
-def oklch_to_hex(L, C, H):
-    """OKLCH -> sRGB hex. Values outside sRGB gamut are clipped per channel."""
-    h = math.radians(H)
-    a, b = C * math.cos(h), C * math.sin(h)
-    l_ = L + 0.3963377774 * a + 0.2158037573 * b
-    m_ = L - 0.1055613458 * a - 0.0638541728 * b
-    s_ = L - 0.0894841775 * a - 1.2914855480 * b
-    l, m, s = l_ ** 3, m_ ** 3, s_ ** 3
-    r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
-    g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
-    bl = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
-
-    def enc(u):
-        u = 12.92 * u if u <= 0.0031308 else 1.055 * (max(u, 0) ** (1 / 2.4)) - 0.055
-        return max(0, min(255, round(u * 255)))
-
-    return "#{:02x}{:02x}{:02x}".format(enc(r), enc(g), enc(bl))
-
-
-def _lum(h):
-    h = h.lstrip("#")
-    ch = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
-    ch = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in ch]
-    return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
-
-
-def contrast(a, b):
-    l1, l2 = sorted((_lum(a), _lum(b)), reverse=True)
-    return (l1 + 0.05) / (l2 + 0.05)
-
-
-def mix(a, b, t):
-    a, b = a.lstrip("#"), b.lstrip("#")
-    return "#" + "".join(
-        f"{round(int(a[i:i+2], 16) * (1 - t) + int(b[i:i+2], 16) * t):02x}"
-        for i in (0, 2, 4)
-    )
-
-
-def at_contrast(bg, fg, target):
-    """Blend bg toward fg until it hits `target` contrast against bg.
-
-    Deriving the greys this way (rather than borrowing kitty's ANSI color8/
-    color0) is what keeps them legible: ANSI 'bright black' is near-invisible
-    on a near-black panel -- measured 1.16:1, well under the 4.5:1 needed for
-    body text.
-    """
-    lo, hi = 0.0, 1.0
-    for _ in range(40):
-        mid = (lo + hi) / 2
-        if contrast(mix(bg, fg, mid), bg) < target:
-            lo = mid
-        else:
-            hi = mid
-    return mix(bg, fg, hi)
-
-
-def parse_color(v):
-    v = v.strip()
-    if re.fullmatch(r"#[0-9a-fA-F]{6}", v):
-        return v.lower()
-    m = re.match(r"oklch\(\s*([0-9.]+)(%?)\s+([0-9.]+)\s+([0-9.]+)\s*\)", v)
-    if not m:
-        return None
-    L = float(m.group(1))
-    if m.group(2):  # percentage form
-        L /= 100
-    return oklch_to_hex(L, float(m.group(3)), float(m.group(4)))
-
-
-def load_kitty_theme(mode):
-    path = os.path.join(KITTY_DIR, "themes", f"theme-{mode}.conf")
-    if not os.path.exists(path):
-        sys.exit(f"herdr-theme: missing kitty theme: {path}")
-    colors = {}
-    for line in open(path, encoding="utf-8"):
-        line = line.split("#!")[0]
-        m = re.match(r"^\s*([a-z_0-9]+)\s+(.+?)\s*$", line)
-        if not m:
-            continue
-        key, val = m.group(1), m.group(2)
-        # skip comment lines, but keep bare hex values
-        if val.lstrip().startswith("#") and not re.fullmatch(r"#[0-9a-fA-F]{6}", val.strip()):
-            continue
-        hexval = parse_color(val)
-        if hexval:
-            colors[key] = hexval
-            # Keep the authored string too: the OKLCH form carries chroma/hue
-            # that the hex round-trip preserves but that is awkward to recover.
-            # accent darkening needs it (see ACTIVE_MIN).
-            colors["__raw__" + key] = val.strip()
-    return colors
-
-
 def build_palette(mode):
     """Map kitty color roles onto herdr's token names."""
-    k = load_kitty_theme(mode)
+    k = load_kitty_theme(mode, "herdr-theme")
     required = ["background", "foreground", "active_border_color"]
     missing = [r for r in required if r not in k]
     if missing:
@@ -160,20 +72,8 @@ def build_palette(mode):
     # under AA for a label -- so darken toward the foreground just enough to
     # clear 4.5:1. Hue is preserved; on the dark theme this is a no-op.
     def legible(color):
-        """Nudge a hue toward the foreground until it clears WCAG AA (4.5:1).
-
-        Bright ANSI colors are low-contrast on a white panel -- the light
-        theme's yellow measures 2.18:1 -- so any of them used as text needs
-        deepening. Hue is preserved; colors already at AA pass through
-        unchanged, which makes this close to a no-op on the dark theme.
-        """
-        if contrast(color, bg) >= 4.5:
-            return color
-        for i in range(1, 41):
-            candidate = mix(color, fg, i / 40)
-            if contrast(candidate, bg) >= 4.5:
-                return candidate
-        return fg
+        """WCAG-AA (4.5:1) nudge against this theme's bg/fg. See kitty_colors."""
+        return _legible(color, bg, fg)
 
     # accent is also the ACTIVE pane border, and that is the main focus cue.
     # `legible` only guarantees 4.5:1 (AA for text), which on the light theme
@@ -181,33 +81,19 @@ def build_palette(mode):
     # versus 8x on dark, so the focused pane barely stood out. Push it further
     # for the border role. Hue is preserved; the dark theme's yellow already
     # measures 15.4:1 so this is a no-op there.
-    ACTIVE_MIN = 6.5
-    accent = legible(k["active_border_color"])
-    if contrast(accent, bg) < ACTIVE_MIN:
-        # Darken in OKLCH rather than blending toward `fg`. A plain mix() drags
-        # the hue toward the text colour and washes the chroma out -- on the
-        # light theme it took the pink from 72% to 46% saturation, visibly
-        # muddy. Dropping L while holding C and H keeps it vivid.
-        src = k.get("__raw__active_border_color", "")
-        m = re.match(r"oklch\(\s*([0-9.]+)(%?)\s+([0-9.]+)\s+([0-9.]+)\s*\)", src.strip())
-        if m:
-            L0 = float(m.group(1)) / (100 if m.group(2) else 1)
-            C0, H0 = float(m.group(3)), float(m.group(4))
-            darker = L0 > 0.5   # light panel -> go down; dark panel -> go up
-            for step in range(1, 61):
-                L = L0 + (-step if darker else step) * 0.01
-                if not 0.0 <= L <= 1.0:
-                    break
-                cand = oklch_to_hex(L, C0, H0)
-                if contrast(cand, bg) >= ACTIVE_MIN:
-                    accent = cand
-                    break
-        else:
-            for i in range(1, 61):
-                cand = mix(accent, fg, i / 60)
-                if contrast(cand, bg) >= ACTIVE_MIN:
-                    accent = cand
-                    break
+    # 4.5 = WCAG AA, the same floor `legible` uses. Deliberately NOT higher:
+    # the light theme's authored pink oklch(0.65537 0.25769 358.383) -> #db2587
+    # measures 4.54:1 and so passes through untouched, which is what we want --
+    # it is the colour chosen in the kitty theme. An earlier 6.5 floor darkened
+    # it to #b80058 for a wider active/inactive split, but that overrode the
+    # authored hue. The focus cue instead comes mostly from surface1 being
+    # dimmed to 1.55, which still leaves a 2.9x split on light and 9.8x on dark.
+    ACTIVE_MIN = 4.5
+    accent = deepen(
+        legible(k["active_border_color"]),
+        k.get("__raw__active_border_color", ""),
+        bg, fg, ACTIVE_MIN,
+    )
 
     return {
         "accent":      accent,
@@ -243,7 +129,7 @@ def render_block(mode, palette):
     lines = [
         BEGIN,
         f"# Generated by herdr-theme from kitty themes/theme-{mode}.conf -- do not hand-edit.",
-        "# Regenerate:  ~/.config/kitty/herdr-theme {dark|light}",
+        "# Regenerate:  kitty-config/herdr-theme {dark|light}",
         "[theme.custom]",
     ]
     lines += [f'{t} = "{palette[t]}"' for t in TOKENS]
