@@ -30,12 +30,21 @@ for cp in list(range(0x2000,0x3300)) + list(range(0x1F000,0x1FBFF)):
     # U+26A0, stopwatch U+23F1. Apple Color Emoji supplies those too, and they
     # clipped just like the width-2 ones, so both widths must be mapped.
     #
-    # TEXT_KEEP: width-1 emoji that are ALSO in common use as plain text glyphs
-    # in TUI output. Routing these to a colour emoji font makes CLI checkmarks
-    # render as pictures, so keep them on the text font.
-    TEXT_KEEP = {0x2714, 0x2716, 0x2733, 0x2734, 0x2747}
-    if (q.get("is_emoji") and q.get("is_emoji_presentation_base")
-            and q.get("width") in (1, 2) and cp not in TEXT_KEEP):
+    # For width-1, only take codepoints at U+1F000 and above. Everything below
+    # that in the width-1 set is a dual-purpose BMP symbol that TUIs draw as
+    # plain TEXT: media-control glyphs (U+23E9-U+23FA -- pause, stop, and the
+    # record circle U+23FA that Claude Code uses for tool markers), geometric
+    # shapes (U+25AA-U+25FC), dingbats (U+2714 heavy check, U+2716 heavy X),
+    # and arrows (U+27A1, U+2B05-U+2B07). Routing those to a colour emoji font
+    # turns terminal UI chrome into pictures.
+    #
+    # Two exceptions are allowed back in: warning U+26A0 and stopwatch U+23F1
+    # are used as genuine emoji in CLI output (they were the reported clipping
+    # cases) and have no competing text role here.
+    TEXT_ALLOW = {0x26A0, 0x23F1}
+    w = q.get("width")
+    if q.get("is_emoji") and q.get("is_emoji_presentation_base") and (
+            w == 2 or (w == 1 and (cp >= 0x1F000 or cp in TEXT_ALLOW))):
         hits.append(cp)
 out=[]
 for x in hits:
@@ -62,7 +71,20 @@ PY
 # Sanity: text symbols must NOT be inside the mapped set.
 kitty +runpy '
 from kitty.fast_data_types import char_props_for
-bad=[c for c in "❯✓→●○│─" 
-     if char_props_for(c).get("is_emoji") and char_props_for(c).get("width")==2]
+# Guard the FULL set of glyphs terminal UIs draw as text: prompt chars, box
+# drawing, media controls (incl. U+23FA record, used for tool markers), heavy
+# dingbats and black arrows. Any of these landing in the map means colour
+# pictures in place of UI chrome.
+import os, re
+_cfg = os.path.expanduser("~/.config/kitty/kitty.conf")
+_line = [l for l in open(_cfg) if l.startswith("symbol_map ") and "Noto" in l][0]
+_rs = []
+for _t in _line.split()[1].split(","):
+    if "-" in _t:
+        _a, _b = _t.split("-"); _rs.append((int(_a[2:], 16), int(_b[2:], 16)))
+    else:
+        _v = int(_t[2:], 16); _rs.append((_v, _v))
+bad = [c for c in "❯✓✔✖→●○│─┌┐└┘⏺⏸⏹▪▫➡⬅⬆⬇"
+       if any(a <= ord(c) <= b for a, b in _rs)]
 print("ERROR: text symbols captured: "+repr(bad) if bad else "verified: text symbols excluded")
 '
