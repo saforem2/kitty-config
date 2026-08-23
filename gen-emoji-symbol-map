@@ -25,7 +25,17 @@ hits=[]
 for cp in list(range(0x2000,0x3300)) + list(range(0x1F000,0x1FBFF)):
     try: q = char_props_for(chr(cp))
     except Exception: continue
-    if q.get("is_emoji") and q.get("is_emoji_presentation_base") and q.get("width")==2:
+    # width==2 is the bulk (real emoji). width==1 emoji are TEXT-DEFAULT chars
+    # that render as emoji only with variation selector U+FE0F -- e.g. warning
+    # U+26A0, stopwatch U+23F1. Apple Color Emoji supplies those too, and they
+    # clipped just like the width-2 ones, so both widths must be mapped.
+    #
+    # TEXT_KEEP: width-1 emoji that are ALSO in common use as plain text glyphs
+    # in TUI output. Routing these to a colour emoji font makes CLI checkmarks
+    # render as pictures, so keep them on the text font.
+    TEXT_KEEP = {0x2714, 0x2716, 0x2733, 0x2734, 0x2747}
+    if (q.get("is_emoji") and q.get("is_emoji_presentation_base")
+            and q.get("width") in (1, 2) and cp not in TEXT_KEEP):
         hits.append(cp)
 out=[]
 for x in hits:
