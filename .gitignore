@@ -10,5 +10,8 @@ font-symbol-map.conf
 # Python type checker cache
 .pyre/
 
+# Python bytecode cache
+__pycache__/
+
 # timestamped theme snapshots — superseded by the oklch versions
 themes/*.conf-*.bak
