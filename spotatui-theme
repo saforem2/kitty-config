@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Rewrite spotatui's [theme] block to mirror the kitty light/dark theme.
+
+Usage: spotatui-theme {dark|light} [--config PATH] [--print]
+
+Third mirror of the kitty palette, after herdr-theme and leaf-theme, and it
+shares their color math via kitty_colors.py. Two things make it differ from
+herdr-theme, and both drive the design here:
+
+1. spotatui wants DECIMAL TRIPLES ("205, 214, 244"), not hex. It also accepts
+   the literal `Reset`, which means "whatever the terminal already had" -- fine
+   on the dark theme by accident, wrong on light. Every token is written as an
+   explicit triple so both modes actually look like themselves.
+
+2. spotatui REWRITES config.yml wholesale from memory (UserConfig::save_config,
+   reached from the DJ model picker, the settings screen, and the audio-analysis
+   toggle). So a marker-delimited managed block -- herdr-theme's approach --
+   cannot survive: YAML comments are dropped on the app's next save. Instead we
+   rewrite the `theme:` mapping key by key and leave every other byte alone, and
+   warn when a live process could clobber us. See rewrite_theme_block().
+
+spotatui also has no config-watch or reload channel (no SIGUSR1 handler, no
+notify watcher), so a running instance keeps its old colors regardless; the
+warning covers that too.
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+# realpath, not abspath: this script is also symlinked into ~/.config/kitty,
+# where kitty_colors.py does not exist. Same reasoning as herdr-theme.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from kitty_colors import (  # noqa: E402
+    at_contrast, contrast, deepen, legible as _legible, load_kitty_theme,
+)
+
+# spotatui's Theme fields (src/core/theme.rs). `analysis_bar` and
+# `analysis_bar_text` exist on the struct but are #[allow(dead_code)] and are
+# not serialized into config.yml, so they are deliberately absent here --
+# writing them would add keys the app then drops on its next save.
+TOKENS = [
+    "active", "banner", "error_border", "error_text", "hint", "hovered",
+    "inactive", "playbar_background", "playbar_progress",
+    "playbar_progress_text", "playbar_text", "selected", "text", "background",
+    "header", "highlighted_lyrics",
+]
+
+
+def hex_to_triple(h):
+    """#rrggbb -> "r, g, b" -- spotatui's RGB string form."""
+    h = h.lstrip("#")
+    return "{}, {}, {}".format(*(int(h[i:i + 2], 16) for i in (0, 2, 4)))
+
+
+def build_palette(mode):
+    """Map kitty color roles onto spotatui's token names."""
+    k = load_kitty_theme(mode, "spotatui-theme")
+    required = ["background", "foreground", "active_border_color"]
+    missing = [r for r in required if r not in k]
+    if missing:
+        sys.exit(
+            f"spotatui-theme: {mode} theme missing required keys: {', '.join(missing)}"
+        )
+
+    bg, fg = k["background"], k["foreground"]
+
+    def legible(color):
+        """WCAG-AA (4.5:1) nudge against this theme's bg/fg. See kitty_colors."""
+        return _legible(color, bg, fg)
+
+    def hue_safe(name, fallback, target=4.5):
+        """AA-legible version of an ANSI color that KEEPS its hue.
+
+        legible() alone blends toward the foreground, and this light theme's fg
+        is a blue-grey (#4c4f69) -- so the red came out #986873 (mauve) and the
+        orange #976e4a (brown), both visibly off-hue. deepen() walks L in OKLCH
+        with chroma and hue pinned, giving #c0524b and #bc5b00 at the same
+        contrast. Near-no-op on the dark theme, where the ANSI colors already
+        clear AA on their own.
+        """
+        src = name if name in k else fallback
+        color = k.get(src, "#808080")
+        # deepen() FIRST, on the untouched ANSI value. Wrapping legible() around
+        # it the way herdr-theme does for its accent would defeat the point:
+        # legible already lands at >= target, so deepen's early return hands the
+        # blended (hue-dragged) color straight back. legible is only the
+        # fallback for a non-OKLCH source deepen cannot walk.
+        out = deepen(color, k.get("__raw__" + src, ""), bg, fg, target)
+        return out if contrast(out, bg) >= target else legible(color)
+
+    # accent is kitty's active-border color, the same source herdr-theme and
+    # leaf-theme use, so all three surfaces agree on what "focused" looks like.
+    # spotatui draws it as TEXT (the now-playing row, the DJ's "you" label), so
+    # it needs the AA floor, not just border-visibility. ACTIVE_MIN matches
+    # herdr-theme's: 4.5 lets the light theme's authored pink
+    # oklch(0.65537 0.25769 358.383) -> #db2587 (4.54:1) through untouched.
+    ACTIVE_MIN = 4.5
+    accent = deepen(
+        legible(k["active_border_color"]),
+        k.get("__raw__active_border_color", ""),
+        bg, fg, ACTIVE_MIN,
+    )
+
+    # `inactive` is body text in practice -- the DJ pane alone styles ~8 spans
+    # with it (src/tui/ui/ai_dj.rs) -- so it gets the AA floor rather than
+    # spotatui's stock flat 128,128,128, which measures ~1.3:1 on the light
+    # theme's white panel.
+    inactive = at_contrast(bg, fg, 4.5)
+
+    # playbar_background sits just off the panel so the progress bar has a
+    # trough to sit in: barely lighter than bg on dark, barely darker on light.
+    # Same 1.06 target herdr uses for sidebar_bg.
+    playbar_bg = at_contrast(bg, fg, 1.06)
+
+    # `hint` is kitty's yellow/orange, the palette's worst offender on a white
+    # panel (light color3 measures 2.18:1), hence hue_safe() rather than the raw
+    # ANSI value.
+    return {
+        "active": accent,
+        "banner": accent,
+        "error_border": hue_safe("color1", "color9"),
+        "error_text": hue_safe("color9", "color1"),
+        "hint": hue_safe("color3", "color11"),
+        "hovered": hue_safe("color5", "color13"),
+        "inactive": inactive,
+        "playbar_background": playbar_bg,
+        "playbar_progress": accent,
+        "playbar_progress_text": fg,
+        "playbar_text": fg,
+        "selected": accent,
+        "text": fg,
+        "background": bg,
+        "header": fg,
+        "highlighted_lyrics": accent,
+    }
+
+
+def render_block(palette, indent="  "):
+    """The `theme:` mapping body, in TOKENS order, as YAML lines."""
+    lines = [f"{indent}preset: Custom"]
+    lines += [f"{indent}{t}: {hex_to_triple(palette[t])}" for t in TOKENS]
+    return lines
+
+
+def rewrite_theme_block(text, palette):
+    """Replace the `theme:` mapping, leaving the rest of the file byte-identical.
+
+    No marker comments (see module docstring: the app's own save_config would
+    drop them), so the block is found structurally -- from the `theme:` line to
+    the next line at the same indent level or shallower.
+    """
+    lines = text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^theme:\s*$", line):
+            start = i
+            break
+    if start is None:
+        sys.exit(
+            "spotatui-theme: no top-level `theme:` block in config.yml.\n"
+            "Open spotatui once (Alt-, > Theme) so it writes one, then re-run."
+        )
+
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        line = lines[i]
+        if not line.strip():
+            continue
+        # A line that is not indented ends the mapping.
+        if not line.startswith((" ", "\t")):
+            end = i
+            break
+
+    new = lines[:start] + ["theme:"] + render_block(palette) + lines[end:]
+    return "\n".join(new) + "\n"
+
+
+def spotatui_running():
+    """PIDs of the spotatui TUI, excluding its `spotatui mcp` stdio servers."""
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "spotatui"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids = []
+    for pid in out.split():
+        try:
+            cmd = subprocess.run(
+                ["ps", "-o", "command=", "-p", pid],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        # `spotatui mcp` is the MCP server, not the player; a bare `spotatui`
+        # (optionally with flags) is the TUI holding config.yml in memory.
+        if re.search(r"\bspotatui\b(?!.*\bmcp\b)", cmd):
+            pids.append(pid)
+    return pids
+
+
+def apply(config_path, palette, do_print):
+    if do_print:
+        print("theme:")
+        print("\n".join(render_block(palette)))
+        return False
+
+    if not os.path.exists(config_path):
+        sys.exit(f"spotatui-theme: no config at {config_path}")
+    text = open(config_path, encoding="utf-8").read()
+    new = rewrite_theme_block(text, palette)
+    if new == text:
+        return False
+
+    tmp = config_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(new)
+    os.replace(tmp, config_path)
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("mode", choices=["dark", "light"])
+    ap.add_argument("--config",
+                    default=os.path.expanduser("~/.config/spotatui/config.yml"))
+    ap.add_argument("--print", dest="do_print", action="store_true",
+                    help="print the block instead of writing it")
+    args = ap.parse_args()
+
+    palette = build_palette(args.mode)
+    changed = apply(args.config, palette, args.do_print)
+    if changed:
+        print(f"spotatui-theme: applied {args.mode} palette")
+        pids = spotatui_running()
+        if pids:
+            # Two separate problems, one message: spotatui reads config only at
+            # startup (no reload channel), and its own save_config() writes the
+            # whole file back from memory -- so a live instance both ignores
+            # this change and may erase it.
+            print(
+                f"spotatui-theme: spotatui is running (pid {', '.join(pids)}); "
+                "restart it to pick up the theme -- until then it may overwrite "
+                "config.yml from memory.",
+                file=sys.stderr,
+            )
+
+
+if __name__ == "__main__":
+    main()

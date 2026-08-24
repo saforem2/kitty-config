@@ -60,6 +60,23 @@ if [[ -n "$herdr_bin" && -f "$HOME/.config/herdr/config.toml" ]]; then
     fi
 fi
 
+# Mirror the kitty palette into spotatui's `theme:` block.
+#
+# Like herdr (and unlike leaf), the palette is REGENERATED from the kitty theme
+# on every switch, so editing a kitty color follows through automatically.
+#
+# Two spotatui quirks the generator handles, worth knowing about here: it has no
+# reload channel, so a running instance keeps its old colors until restarted;
+# and its own save_config() rewrites config.yml wholesale from memory, so a live
+# instance can erase what we just wrote. spotatui-theme prints a warning to
+# stderr when it sees a running player -- let that through rather than
+# swallowing it, since a silently reverted theme is otherwise baffling.
+spotatui_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/spotatui/config.yml"
+if [[ -f "$spotatui_cfg" ]]; then
+    "$script_dir/spotatui-theme" "$mode" --config "$spotatui_cfg" || \
+        print -u2 "sync-theme: spotatui-theme $mode failed; leaving its theme alone"
+fi
+
 # Keep the spicetify (Spotify) termspot theme in sync with the system appearance.
 # Only re-apply when the scheme actually changed, since `spicetify apply` reloads
 # the Spotify client. Backgrounded so kitty's reload above stays instant.
