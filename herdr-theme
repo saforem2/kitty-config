@@ -57,6 +57,53 @@ SIDEBAR_TINTS = {
 # well as hue. Above ~0.2 the sidebar stops reading as chrome.
 SIDEBAR_TINT_STRENGTH = 0.10
 
+# The active row is a focus cue rather than chrome, so it takes the hue much
+# more strongly than the sidebar does.
+ACCENT_TINT_STRENGTH = 0.65
+SURFACE1_TINT_STRENGTH = 0.22
+
+
+def _tinted_surface(base):
+    """Tint the active-row fill (surface1) with the accent hue, weakly.
+
+    Kept far below the accent strength: surface1 must stay clearly dimmer than
+    accent, or the active row competes with the border for attention.
+    """
+    raw = os.environ.get("HERDR_ACCENT_TINT", "").strip().lower()
+    if not raw:
+        return base
+    hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
+    if hue is None:
+        return base  # _tinted_accent already reports the bad value
+    return mix(base, hue, SURFACE1_TINT_STRENGTH)
+
+
+def _tinted_accent(base):
+    """Shift accent + the active-row fill toward HERDR_ACCENT_TINT, if set.
+
+    accent is the ACTIVE pane border and is also drawn as text, so the result
+    is run back through legible()/deepen() by the caller -- a tint that would
+    fall under WCAG AA gets darkened automatically rather than shipped
+    unreadable. Stronger than the sidebar tint (the active row is a
+    deliberate focus cue, not chrome), but still hue-shift rather than
+    replacement, so the theme's own lightness relationships survive.
+    """
+    raw = os.environ.get("HERDR_ACCENT_TINT", "").strip().lower()
+    if not raw:
+        return base
+    hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
+    if hue is None:
+        sys.exit(
+            f"herdr-theme: unknown HERDR_ACCENT_TINT {raw!r}; "
+            f"expected a #rrggbb value or one of: {', '.join(sorted(SIDEBAR_TINTS))}"
+        )
+    # REPLACE rather than mix: the authored accent is pink, and blending pink
+    # toward green passes through grey -- at 0.65 that produced a muddy
+    # #6d616c with no hue left. The caller runs the result through
+    # legible()/deepen(), which darkens it to clear WCAG AA if needed, so
+    # handing over the raw hue is safe.
+    return hue
+
 
 def _tinted_sidebar(base):
     """Nudge the derived sidebar_bg toward HERDR_SIDEBAR_TINT, if set."""
@@ -143,7 +190,7 @@ def build_palette(mode):
     # dimmed to 1.55, which still leaves a 2.9x split on light and 9.8x on dark.
     ACTIVE_MIN = 4.5
     accent = deepen(
-        legible(k["active_border_color"]),
+        legible(_tinted_accent(k["active_border_color"])),
         k.get("__raw__active_border_color", ""),
         bg, fg, ACTIVE_MIN,
     )
@@ -169,7 +216,7 @@ def build_palette(mode):
         # the gap to `accent` (the active border) is wide: at 1.9 the light
         # theme separated active from inactive by only 2.4x, versus 8x on dark,
         # which made the focused pane hard to spot. See ACTIVE_MIN below.
-        "surface1":    at_contrast(bg, fg, 1.55),
+        "surface1":    _tinted_surface(at_contrast(bg, fg, 1.55)),
         "surface_dim": at_contrast(bg, fg, 1.08),
         "overlay0":    at_contrast(bg, fg, 4.5),
         "overlay1":    at_contrast(bg, fg, 6.0),
