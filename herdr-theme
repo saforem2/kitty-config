@@ -42,7 +42,10 @@ SIDEBAR_TINTS = {
     "green":  "#1e8759",
     "blue":   "#327abc",
 }
-SIDEBAR_TINT_STRENGTH = 0.16
+# How far sidebar_bg is mixed toward the tint hue. Overridable per machine with
+# HERDR_SIDEBAR_TINT_STRENGTH so two tinted hosts can differ in intensity as
+# well as hue. Above ~0.2 the sidebar stops reading as chrome.
+SIDEBAR_TINT_STRENGTH = 0.10
 
 
 def _tinted_sidebar(base):
@@ -56,7 +59,17 @@ def _tinted_sidebar(base):
             f"herdr-theme: unknown HERDR_SIDEBAR_TINT {raw!r}; "
             f"expected a #rrggbb value or one of: {', '.join(sorted(SIDEBAR_TINTS))}"
         )
-    return mix(base, hue, SIDEBAR_TINT_STRENGTH)
+    raw_strength = os.environ.get("HERDR_SIDEBAR_TINT_STRENGTH", "").strip()
+    if raw_strength:
+        try:
+            strength = float(raw_strength)
+        except ValueError:
+            sys.exit(f"herdr-theme: HERDR_SIDEBAR_TINT_STRENGTH must be a number, got {raw_strength!r}")
+        if not 0.0 <= strength <= 1.0:
+            sys.exit(f"herdr-theme: HERDR_SIDEBAR_TINT_STRENGTH must be in [0, 1], got {strength}")
+    else:
+        strength = SIDEBAR_TINT_STRENGTH
+    return mix(base, hue, strength)
 
 # herdr's CustomThemeColors fields, in declaration order.
 TOKENS = [
