@@ -25,8 +25,38 @@ import sys
 # would not resolve that, leaving kitty_colors unimportable from the link.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from kitty_colors import (  # noqa: E402
-    at_contrast, contrast, deepen, legible as _legible, load_kitty_theme,
+    at_contrast, contrast, deepen, legible as _legible, load_kitty_theme, mix,
 )
+
+# Optional per-machine sidebar tint. Set HERDR_SIDEBAR_TINT to one of these
+# names (or any hex) to nudge sidebar_bg toward that hue, so two machines
+# running the same kitty theme are still tellable apart at a glance. Unset =
+# the neutral, purely contrast-derived sidebar (the historical behaviour).
+# The tint is applied AFTER the 1.06 contrast step and is deliberately weak,
+# so the sidebar still reads as chrome rather than as a coloured panel.
+SIDEBAR_TINTS = {
+    "amber":  "#ff9d00",
+    "teal":   "#00b3a4",
+    "violet": "#8260cc",
+    "rose":   "#db2587",
+    "green":  "#1e8759",
+    "blue":   "#327abc",
+}
+SIDEBAR_TINT_STRENGTH = 0.16
+
+
+def _tinted_sidebar(base):
+    """Nudge the derived sidebar_bg toward HERDR_SIDEBAR_TINT, if set."""
+    raw = os.environ.get("HERDR_SIDEBAR_TINT", "").strip().lower()
+    if not raw:
+        return base
+    hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
+    if hue is None:
+        sys.exit(
+            f"herdr-theme: unknown HERDR_SIDEBAR_TINT {raw!r}; "
+            f"expected a #rrggbb value or one of: {', '.join(sorted(SIDEBAR_TINTS))}"
+        )
+    return mix(base, hue, SIDEBAR_TINT_STRENGTH)
 
 # herdr's CustomThemeColors fields, in declaration order.
 TOKENS = [
@@ -103,7 +133,7 @@ def build_palette(mode):
         # the near-black bg (pure-black-on-black is invisible); on light,
         # slightly darker than white. Kept below surface0 so an active row still
         # lifts off it.
-        "sidebar_bg":  at_contrast(bg, fg, 1.06),
+        "sidebar_bg":  _tinted_sidebar(at_contrast(bg, fg, 1.06)),
         "surface0":    at_contrast(bg, fg, 1.25),
         # surface1 doubles as the INACTIVE pane border. Held deliberately low so
         # the gap to `accent` (the active border) is wide: at 1.9 the light
