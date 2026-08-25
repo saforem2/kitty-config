@@ -46,6 +46,11 @@ SIDEBAR_TINTS = {
     # pushes G well above it, so the G-vs-R relationship flips rather than
     # both just looking "cool".
     "sky":    "#3fa9f5",
+    # mint is a light, slightly cool green. Against `violet` it is the
+    # strongest pairing available here: violet keeps B above G, mint pushes G
+    # above B, so the blue-vs-green relationship inverts rather than the two
+    # merely differing in lightness.
+    "mint":   "#3ddc97",
 }
 # How far sidebar_bg is mixed toward the tint hue. Overridable per machine with
 # HERDR_SIDEBAR_TINT_STRENGTH so two tinted hosts can differ in intensity as
