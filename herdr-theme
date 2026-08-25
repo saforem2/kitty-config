@@ -133,7 +133,14 @@ def build_palette(mode):
         # the near-black bg (pure-black-on-black is invisible); on light,
         # slightly darker than white. Kept below surface0 so an active row still
         # lifts off it.
-        "sidebar_bg":  _tinted_sidebar(at_contrast(bg, fg, 1.06)),
+        #
+        # 1.15, not 1.06. The dark theme's bg is oklch L=0.226 (#1c1c1c), so a
+        # 1.06 target left the sidebar at #222222 -- 1.07:1 against the panel,
+        # which reads as one flat black slab with no visible divider. 1.15 gives
+        # #282828 (1.16:1): still clearly chrome, but the edge is findable.
+        # Do not raise this to 1.25 -- that resolves to #2e2e2e on dark, exactly
+        # surface0, and the active row would stop lifting off the sidebar.
+        "sidebar_bg":  _tinted_sidebar(at_contrast(bg, fg, 1.15)),
         "surface0":    at_contrast(bg, fg, 1.25),
         # surface1 doubles as the INACTIVE pane border. Held deliberately low so
         # the gap to `accent` (the active border) is wide: at 1.9 the light
