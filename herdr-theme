@@ -41,6 +41,11 @@ SIDEBAR_TINTS = {
     "rose":   "#db2587",
     "green":  "#1e8759",
     "blue":   "#327abc",
+    # sky is a lighter, greener blue than `blue`. Against `violet` it is the
+    # one that reads clearly different: violet leaves G just below R, sky
+    # pushes G well above it, so the G-vs-R relationship flips rather than
+    # both just looking "cool".
+    "sky":    "#3fa9f5",
 }
 # How far sidebar_bg is mixed toward the tint hue. Overridable per machine with
 # HERDR_SIDEBAR_TINT_STRENGTH so two tinted hosts can differ in intensity as
