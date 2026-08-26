@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Rewrite nom's `theme:` block to mirror the kitty light/dark theme.
+
+Usage: nom-theme {dark|light} [--config PATH] [--print]
+
+nom (RSS TUI) exposes exactly four theme keys -- glamour, titleColor,
+filterColor, selectedItemColor -- plus readIcon. `glamour: auto` already
+follows the terminal background on its own, so only the three TUI colours
+need rewriting per mode.
+
+Unlike leaf, nom has no include or symlink indirection: config.yml is one
+flat file holding the theme AND the whole feed list. So this edits in place,
+replacing only the mapping under `theme:` and leaving every other line --
+feeds, comments, http settings -- byte for byte.
+"""
+
+import argparse
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from kitty_colors import (  # noqa: E402
+    at_contrast, contrast, legible as _legible, load_kitty_theme,
+)
+
+DEFAULT_CONFIG = os.path.expanduser(
+    "~/Library/Application Support/nom/config.yml")
+
+
+def build_theme(mode):
+    k = load_kitty_theme(mode, "nom-theme")
+    for req in ("background", "foreground", "active_border_color"):
+        if req not in k:
+            sys.exit(f"nom-theme: kitty {mode} theme is missing {req}")
+    bg, fg = k["background"], k["foreground"]
+
+    def legible(c):
+        """WCAG-AA (4.5:1) nudge against this theme's bg/fg."""
+        return _legible(c, bg, fg)
+
+    return {
+        # glamour renders the article body and detects the terminal
+        # background itself; leave it on auto rather than pinning a mode.
+        "glamour": "auto",
+        # titleColor is the header, drawn as text -- the raw accent is only
+        # 3.6:1 on the light theme, so nudge it to AA like herdr-theme does.
+        "titleColor": legible(k["active_border_color"]),
+        # filterColor is the dimmed filter/help text: the quietest thing that
+        # still has to be READ, so target AA exactly rather than going dimmer.
+        "filterColor": at_contrast(bg, fg, 4.5),
+        # selectedItemColor marks the cursor row. color5 keeps it distinct
+        # from titleColor on both themes; fall back to the accent if absent.
+        "selectedItemColor": legible(k.get("color5",
+                                           k["active_border_color"])),
+    }
+
+
+def render(theme):
+    lines = ["theme:"]
+    for key, val in theme.items():
+        lines.append(f'  {key}: "{val}"' if val.startswith("#")
+                     else f"  {key}: {val}")
+    return "\n".join(lines)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("mode", choices=["dark", "light"])
+    ap.add_argument("--config", default=DEFAULT_CONFIG)
+    ap.add_argument("--print", action="store_true", dest="only_print",
+                    help="print the block instead of writing it")
+    args = ap.parse_args()
+
+    theme = build_theme(args.mode)
+    block = render(theme)
+
+    if args.only_print:
+        print(block)
+        return
+
+    if not os.path.exists(args.config):
+        sys.exit(f"nom-theme: no config at {args.config}")
+    with open(args.config, encoding="utf-8") as fh:
+        text = fh.read()
+
+    # Replace the top-level `theme:` mapping only. The pattern is anchored at
+    # column 0 so the commented-out `# theme:` example block below it -- and
+    # anything indented under `feeds:` -- is left alone.
+    pattern = re.compile(r"^theme:\n(?:[ \t]+\S.*\n)*", re.M)
+    if pattern.search(text):
+        new = pattern.sub(block + "\n", text, count=1)
+    else:
+        sys.exit("nom-theme: no top-level `theme:` block found; refusing to "
+                 "guess where to insert one")
+
+    if new == text:
+        print(f"nom-theme: {args.mode} palette already applied")
+        return
+    tmp = args.config + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(new)
+    os.replace(tmp, args.config)
+    print(f"nom-theme: applied {args.mode} palette")
+
+
+if __name__ == "__main__":
+    main()

@@ -87,6 +87,21 @@ if command -v spicetify >/dev/null 2>&1; then
         ( spicetify config color_scheme "$spot_scheme" && spicetify apply ) >/dev/null 2>&1 &
     fi
 fi
+# Mirror the palette into nom (RSS TUI).
+#
+# Unlike leaf above, nom has no symlink or include indirection -- config.yml is
+# one flat file holding the theme AND the whole feed list -- so nom-theme edits
+# the `theme:` mapping in place and leaves everything else byte for byte.
+# `glamour: auto` handles the article body on its own; only the three TUI
+# colours need rewriting.
+#
+# Best-effort like the blocks above: nom being absent must not break the switch.
+# No reload channel and nom is short-lived, so already-open instances keep
+# their colours -- the next launch picks these up.
+if [[ -f "$HOME/Library/Application Support/nom/config.yml" ]]; then
+    "$script_dir/nom-theme" "$mode" >/dev/null 2>&1 || true
+fi
+
 # for pid in "$(ps -x | grep '/Applications/kitty.app/Contents/MacOS/kitty' | grep -v grep | awk '{ print $1 }')"; do
 #     kill -SIGUSR1 $pid
 # done
