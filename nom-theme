@@ -40,9 +40,13 @@ def build_theme(mode):
         return _legible(c, bg, fg)
 
     return {
-        # glamour renders the article body and detects the terminal
-        # background itself; leave it on auto rather than pinning a mode.
-        "glamour": "auto",
+        # glamour renders the article body. Do NOT leave this on "auto":
+        # glamour's auto-detection reads COLORFGBG, which kitty does not set,
+        # and its OSC-11 background query is swallowed by the full-screen
+        # bubbletea TUI -- so auto silently falls back to DARK and renders
+        # washed-out grey body text on the light theme's white background.
+        # We already know the mode here, so state it.
+        "glamour": mode,
         # titleColor is the header, drawn as text -- the raw accent is only
         # 3.6:1 on the light theme, so nudge it to AA like herdr-theme does.
         "titleColor": legible(k["active_border_color"]),
