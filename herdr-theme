@@ -63,13 +63,58 @@ ACCENT_TINT_STRENGTH = 0.65
 SURFACE1_TINT_STRENGTH = 0.22
 
 
+# Per-machine tint settings live in a FILE, not just the environment.
+#
+# sync-theme calls this script from Hammerspoon on every macOS appearance
+# change, via os.execute -- no login shell, so nothing exported from
+# ~/.zshrc.local is visible and the tint silently reverted on the next
+# light/dark switch. Read ~/.config/herdr/tint.conf as the source of truth and
+# let the environment override it for one-off runs.
+#
+# Format: one KEY=value per line, '#' comments allowed. Keys are the same as
+# the env vars, without the HERDR_ prefix:
+#     SIDEBAR_TINT=mint
+#     SIDEBAR_TINT_STRENGTH=0.10
+#     ACCENT_TINT=#1aa912
+TINT_CONF = os.path.expanduser("~/.config/herdr/tint.conf")
+
+
+def _tint_setting(key):
+    """Env var HERDR_<key> wins; otherwise <key> from TINT_CONF; else ''."""
+    val = os.environ.get("HERDR_" + key, "").strip()
+    if val:
+        return val
+    try:
+        with open(TINT_CONF, encoding="utf-8") as fh:
+            for line in fh:
+                # Split on '=' FIRST: a value may legitimately start with
+                # '#' (a hex colour), so stripping comments before the split
+                # would silently truncate ACCENT_TINT=#1aa912 to nothing.
+                if "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip().lstrip("#") != k.strip():
+                    continue  # the whole line was a comment
+                if k.strip() != key:
+                    continue
+                v = v.strip()
+                # A trailing comment is only a comment when it follows
+                # whitespace, so '#1aa912  # note' keeps the colour.
+                if " #" in v:
+                    v = v.split(" #", 1)[0].strip()
+                return v.strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
 def _tinted_surface(base):
     """Tint the active-row fill (surface1) with the accent hue, weakly.
 
     Kept far below the accent strength: surface1 must stay clearly dimmer than
     accent, or the active row competes with the border for attention.
     """
-    raw = os.environ.get("HERDR_ACCENT_TINT", "").strip().lower()
+    raw = _tint_setting("ACCENT_TINT").lower()
     if not raw:
         return base
     hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
@@ -88,7 +133,7 @@ def _tinted_accent(base):
     deliberate focus cue, not chrome), but still hue-shift rather than
     replacement, so the theme's own lightness relationships survive.
     """
-    raw = os.environ.get("HERDR_ACCENT_TINT", "").strip().lower()
+    raw = _tint_setting("ACCENT_TINT").lower()
     if not raw:
         return base
     hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
@@ -107,7 +152,7 @@ def _tinted_accent(base):
 
 def _tinted_sidebar(base):
     """Nudge the derived sidebar_bg toward HERDR_SIDEBAR_TINT, if set."""
-    raw = os.environ.get("HERDR_SIDEBAR_TINT", "").strip().lower()
+    raw = _tint_setting("SIDEBAR_TINT").lower()
     if not raw:
         return base
     hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
@@ -116,7 +161,7 @@ def _tinted_sidebar(base):
             f"herdr-theme: unknown HERDR_SIDEBAR_TINT {raw!r}; "
             f"expected a #rrggbb value or one of: {', '.join(sorted(SIDEBAR_TINTS))}"
         )
-    raw_strength = os.environ.get("HERDR_SIDEBAR_TINT_STRENGTH", "").strip()
+    raw_strength = _tint_setting("SIDEBAR_TINT_STRENGTH")
     if raw_strength:
         try:
             strength = float(raw_strength)
