@@ -25,7 +25,8 @@ import sys
 # would not resolve that, leaving kitty_colors unimportable from the link.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from kitty_colors import (  # noqa: E402
-    at_contrast, contrast, deepen, legible as _legible, load_kitty_theme, mix,
+    at_contrast, contrast, deepen, hex_to_oklch, legible as _legible, _lum,
+    load_kitty_theme, mix, oklch_to_hex,
 )
 
 # Optional per-machine sidebar tint. Set HERDR_SIDEBAR_TINT to one of these
@@ -60,7 +61,10 @@ SIDEBAR_TINT_STRENGTH = 0.10
 # The active row is a focus cue rather than chrome, so it takes the hue much
 # more strongly than the sidebar does.
 ACCENT_TINT_STRENGTH = 0.65
-SURFACE1_TINT_STRENGTH = 0.22
+# Fraction of the accent's chroma the active-row fill keeps. The row is a
+# wash behind text, so it takes the hue at low saturation; lightness comes
+# from the contrast-derived base, not from the accent.
+SURFACE1_CHROMA = 0.30
 
 
 # Per-machine tint settings live in a FILE, not just the environment.
@@ -108,7 +112,7 @@ def _tint_setting(key):
     return ""
 
 
-def _tinted_surface(base):
+def _tinted_surface(base, bg):
     """Tint the active-row fill (surface1) with the accent hue, weakly.
 
     Kept far below the accent strength: surface1 must stay clearly dimmer than
@@ -120,7 +124,31 @@ def _tinted_surface(base):
     hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
     if hue is None:
         return base  # _tinted_accent already reports the bad value
-    return mix(base, hue, SURFACE1_TINT_STRENGTH)
+
+    # Derive this the way CSS would with
+    #     oklch(from var(--accent) calc(l * scale) calc(c * scale) h)
+    # -- keep the accent's HUE exactly, damp its chroma to a wash, and move
+    # only lightness, toward the panel. Blending in sRGB (the previous
+    # mix(base, hue, 0.22)) drags the hue through grey and washes the chroma
+    # out; deepen()'s docstring documents the same failure for the accent
+    # itself, where it cost 72% -> 46% saturation.
+    _, C, H = hex_to_oklch(hue)
+    L_base, _, _ = hex_to_oklch(base)
+    # Adding chroma at a fixed L raises luminance, which quietly weakened the
+    # active/inactive split (1.85 -> 1.51 against the light panel). Walk L back
+    # toward the panel until the tinted fill matches the contrast the untinted
+    # base had, so the tint changes the HUE and nothing else.
+    target = contrast(base, bg)
+    darker = _lum(bg) > 0.5
+    L = L_base
+    for _ in range(120):
+        cand = oklch_to_hex(L, C * SURFACE1_CHROMA, H)
+        if contrast(cand, bg) >= target:
+            return cand
+        L += -0.005 if darker else 0.005
+        if not 0.0 <= L <= 1.0:
+            break
+    return oklch_to_hex(max(0.0, min(1.0, L_base)), C * SURFACE1_CHROMA, H)
 
 
 def _tinted_accent(base):
@@ -261,7 +289,7 @@ def build_palette(mode):
         # the gap to `accent` (the active border) is wide: at 1.9 the light
         # theme separated active from inactive by only 2.4x, versus 8x on dark,
         # which made the focused pane hard to spot. See ACTIVE_MIN below.
-        "surface1":    _tinted_surface(at_contrast(bg, fg, 1.55)),
+        "surface1":    _tinted_surface(at_contrast(bg, fg, 1.55), bg),
         "surface_dim": at_contrast(bg, fg, 1.08),
         "overlay0":    at_contrast(bg, fg, 4.5),
         "overlay1":    at_contrast(bg, fg, 6.0),

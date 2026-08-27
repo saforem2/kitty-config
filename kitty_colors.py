@@ -42,6 +42,34 @@ def oklch_to_hex(L, C, H):
     return "#{:02x}{:02x}{:02x}".format(enc(r), enc(g), enc(bl))
 
 
+def hex_to_oklch(h):
+    """sRGB hex -> (L, C, H). The exact inverse of oklch_to_hex().
+
+    Lets a hand-picked hex tint take the same OKLCH-relative path as a colour
+    authored in the theme -- i.e. CSS's `oklch(from <c> ...)`, where you keep a
+    colour's hue and chroma and move only its lightness. Blending in sRGB
+    instead drags the hue through grey; see deepen()'s docstring.
+    """
+    c = h.lstrip("#")
+    rgb = [int(c[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+
+    def dec(u):
+        return u / 12.92 if u <= 0.04045 else ((u + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (dec(u) for u in rgb)
+    l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+    m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+    s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+    l_, m_, s_ = (u ** (1 / 3) if u >= 0 else -((-u) ** (1 / 3))
+                  for u in (l, m, s))
+    L = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_
+    A = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_
+    B = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+    C = math.hypot(A, B)
+    H = math.degrees(math.atan2(B, A)) % 360
+    return L, C, H
+
+
 def _lum(h):
     h = h.lstrip("#")
     ch = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
