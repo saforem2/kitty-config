@@ -35,6 +35,8 @@ from kitty_colors import (  # noqa: E402
 # names (or any hex) to nudge sidebar_bg toward that hue, so two machines
 # running the same kitty theme are still tellable apart at a glance. Unset =
 # the neutral, purely contrast-derived sidebar (the historical behaviour).
+# The value `accent` is special: it follows the resolved kitty accent per mode
+# rather than a fixed hue -- see _tinted_sidebar for the trade-off.
 # The tint is applied AFTER the 1.06 contrast step and is deliberately weak,
 # so the sidebar still reads as chrome rather than as a coloured panel.
 SIDEBAR_TINTS = {
@@ -63,6 +65,20 @@ SIDEBAR_TINT_STRENGTH = 0.10
 # The active row is a focus cue rather than chrome, so it takes the hue much
 # more strongly than the sidebar does.
 ACCENT_TINT_STRENGTH = 0.65
+
+# Minimum OKLCH chroma for active_border_color to count as a usable accent.
+# The dark theme sets active_border_color #FFFFFF (chroma 0.000), so inheriting
+# it literally gives an achromatic accent: the focus cue degrades to
+# brightness-only and _tinted_surface has no hue to apply, leaving the active
+# row flat grey. Below this floor we fall back to ACCENT_FALLBACK_ROLES.
+# 0.02 rather than exactly 0: near-grey values have an unstable hue angle, so
+# using one would produce an arbitrary tint.
+ACCENT_MIN_CHROMA = 0.02
+
+# Ordered fallbacks when active_border_color is achromatic. color3 first
+# because both themes make it their most saturated high-contrast role; color5
+# and color2 follow so a theme that leaves color3 grey still resolves.
+ACCENT_FALLBACK_ROLES = ["color3", "color5", "color2", "color6"]
 # Fraction of the accent's chroma the active-row fill keeps. The row is a
 # wash behind text, so it takes the hue at low saturation; lightness comes
 # from the contrast-derived base, not from the accent.
@@ -115,18 +131,23 @@ def _tint_setting(key):
     return ""
 
 
-def _tinted_surface(base, bg):
-    """Tint the active-row fill (surface1) with the accent hue, weakly.
+def _tinted_surface(base, bg, hue):
+    """Tint the active-row fill (surface1) toward `hue`, weakly.
 
     Kept far below the accent strength: surface1 must stay clearly dimmer than
     accent, or the active row competes with the border for attention.
+
+    `hue` is the resolved accent (kitty-derived, or the ACCENT_TINT override) --
+    passed in rather than re-read from the tint file, so the active row follows
+    the accent that is actually in use instead of only a manual override.
     """
-    raw = _tint_setting("ACCENT_TINT").lower()
-    if not raw:
+    if not hue:
         return base
-    hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
-    if hue is None:
-        return base  # _tinted_accent already reports the bad value
+    # An achromatic accent has no hue to lend; oklch would spin an arbitrary
+    # angle out of near-zero chroma, so leave the contrast-derived base alone.
+    _, C, H = hex_to_oklch(hue)
+    if C < ACCENT_MIN_CHROMA:
+        return base
 
     # Derive this the way CSS would with
     #     oklch(from var(--accent) calc(l * scale) calc(c * scale) h)
@@ -135,7 +156,6 @@ def _tinted_surface(base, bg):
     # mix(base, hue, 0.22)) drags the hue through grey and washes the chroma
     # out; deepen()'s docstring documents the same failure for the accent
     # itself, where it cost 72% -> 46% saturation.
-    _, C, H = hex_to_oklch(hue)
     L_base, _, _ = hex_to_oklch(base)
     # Adding chroma at a fixed L raises luminance, which quietly weakened the
     # active/inactive split (1.85 -> 1.51 against the light panel). Walk L back
@@ -152,6 +172,36 @@ def _tinted_surface(base, bg):
         if not 0.0 <= L <= 1.0:
             break
     return oklch_to_hex(max(0.0, min(1.0, L_base)), C * SURFACE1_CHROMA, H)
+
+
+def _accent_source(k, mode):
+    """Resolve the kitty role the accent inherits from, for one mode.
+
+    Normally kitty's active_border_color -- herdr's accent IS the active pane
+    border, so that is the honest source. But the dark theme sets it to
+    #FFFFFF: inheriting literally yields an achromatic accent, so the focus cue
+    becomes brightness-only and the active row loses its tint entirely. When
+    the border is below ACCENT_MIN_CHROMA, fall back to the first chromatic
+    role in ACCENT_FALLBACK_ROLES.
+
+    Returns (hex, raw, role) -- `raw` is the value as authored, which deepen()
+    needs to walk lightness without dragging the hue through grey.
+    """
+    border = k["active_border_color"]
+    _, C, _ = hex_to_oklch(border)
+    if C >= ACCENT_MIN_CHROMA:
+        return border, k.get("__raw__active_border_color", ""), "active_border_color"
+
+    for role in ACCENT_FALLBACK_ROLES:
+        if role not in k:
+            continue
+        _, c_fb, _ = hex_to_oklch(k[role])
+        if c_fb >= ACCENT_MIN_CHROMA:
+            return k[role], k.get("__raw__" + role, ""), role
+
+    # Every candidate is grey: a monochrome theme is a legitimate choice, so
+    # honour the border rather than inventing a hue.
+    return border, k.get("__raw__active_border_color", ""), "active_border_color"
 
 
 def _tinted_accent(base):
@@ -181,16 +231,44 @@ def _tinted_accent(base):
     return hue
 
 
-def _tinted_sidebar(base):
-    """Nudge the derived sidebar_bg toward HERDR_SIDEBAR_TINT, if set."""
+def _tinted_sidebar(base, accent):
+    """Nudge the derived sidebar_bg toward HERDR_SIDEBAR_TINT, if set.
+
+    The special value `accent` follows the resolved accent instead of a fixed
+    hue, so the sidebar tracks the kitty theme per mode rather than staying one
+    hard-coded colour across both. That is the difference between a sidebar
+    that belongs to the palette and one that merely sits next to it.
+
+    Trade-off worth knowing: a fixed hue exists so two machines running the
+    same kitty theme stay tellable apart. `accent` gives that up -- both hosts
+    then derive the same sidebar. Keep a named hue on one host if the
+    at-a-glance distinction matters more than the match.
+    """
     raw = _tint_setting("SIDEBAR_TINT").lower()
     if not raw:
         return base
-    hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
+    if raw == "accent":
+        # An achromatic accent has no hue to lend, and mixing toward a grey
+        # would just dim the sidebar rather than tint it. _accent_source
+        # already falls back to a chromatic role, so reaching here means the
+        # whole theme is monochrome -- honour that instead of inventing a hue.
+        L_acc, c_accent, H_acc = hex_to_oklch(accent)
+        if c_accent < ACCENT_MIN_CHROMA:
+            return base
+        # Mix toward the accent's HUE at the sidebar's own lightness, not
+        # toward the accent colour itself. Mixing toward the colour drags
+        # lightness with it: dark's accent is #ffff00 (L 0.97), which lifted
+        # sidebar_bg until active_row_bg sat only 1.02 above it and the focused
+        # row effectively vanished. Re-anchoring L keeps the contrast ladder
+        # that at_contrast() established and lets the tint move hue alone.
+        L_base, _, _ = hex_to_oklch(base)
+        hue = oklch_to_hex(L_base, c_accent, H_acc)
+    else:
+        hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
     if hue is None:
         sys.exit(
-            f"herdr-theme: unknown HERDR_SIDEBAR_TINT {raw!r}; "
-            f"expected a #rrggbb value or one of: {', '.join(sorted(SIDEBAR_TINTS))}"
+            f"herdr-theme: unknown HERDR_SIDEBAR_TINT {raw!r}; expected 'accent', "
+            f"a #rrggbb value, or one of: {', '.join(sorted(SIDEBAR_TINTS))}"
         )
     raw_strength = _tint_setting("SIDEBAR_TINT_STRENGTH")
     if raw_strength:
@@ -205,8 +283,15 @@ def _tinted_sidebar(base):
     return mix(base, hue, strength)
 
 # herdr's CustomThemeColors fields, in declaration order.
+#
+# active_row_bg and selection_bg were added after the original 17: they are in
+# the config reference and present in the 0.9.1-preview binary. Omitting them
+# left the active Space / focused Agent row falling back to the BUILT-IN theme
+# instead of our derived surfaces, which is why the active-row cue did not
+# track the rest of the palette.
 TOKENS = [
-    "accent", "panel_bg", "sidebar_bg", "surface0", "surface1", "surface_dim",
+    "accent", "panel_bg", "sidebar_bg", "active_row_bg", "selection_bg",
+    "surface0", "surface1", "surface_dim",
     "overlay0", "overlay1", "text", "subtext0", "mauve", "green",
     "yellow", "red", "blue", "teal", "peach",
 ]
@@ -265,14 +350,31 @@ def build_palette(mode):
     # authored hue. The focus cue instead comes mostly from surface1 being
     # dimmed to 1.55, which still leaves a 2.9x split on light and 9.8x on dark.
     ACTIVE_MIN = 4.5
-    accent = deepen(
-        legible(_tinted_accent(k["active_border_color"])),
-        k.get("__raw__active_border_color", ""),
-        bg, fg, ACTIVE_MIN,
-    )
+    src_hex, src_raw, _role = _accent_source(k, mode)
+    # An explicit ACCENT_TINT still wins, but it is now an override on top of a
+    # working kitty inherit rather than the only way to get a coloured accent.
+    # When it replaces the colour, src_raw no longer describes the value, so
+    # drop it and let deepen() fall back to blending.
+    tinted = _tinted_accent(src_hex)
+    if tinted != src_hex:
+        src_raw = ""
+    accent = deepen(legible(tinted), src_raw, bg, fg, ACTIVE_MIN)
+
+    # active_row_bg is the active Space / focused Agent row. It is the same
+    # role surface1 already fills for panes, so it reuses that exact value --
+    # one visual language for "this is the focused thing" across sidebar and
+    # split panes.
+    active_row_bg = _tinted_surface(at_contrast(bg, fg, 1.55), bg, accent)
+    # selection_bg is only the Navigate-mode cursor row, which sits ON the
+    # sidebar and moves while the active row stays put. Deliberately quieter
+    # than active_row_bg (surface0's 1.25 vs 1.55) and untinted, so a transient
+    # cursor never outshouts the real selection.
+    selection_bg = at_contrast(bg, fg, 1.25)
 
     return {
-        "accent":      accent,
+        "accent":        accent,
+        "active_row_bg": active_row_bg,
+        "selection_bg":  selection_bg,
         "panel_bg":    bg,
         # sidebar_bg: recessed relative to the panel so the spaces list reads as
         # chrome rather than content. On dark that means slightly lighter than
@@ -286,13 +388,13 @@ def build_palette(mode):
         # #282828 (1.16:1): still clearly chrome, but the edge is findable.
         # Do not raise this to 1.25 -- that resolves to #2e2e2e on dark, exactly
         # surface0, and the active row would stop lifting off the sidebar.
-        "sidebar_bg":  _tinted_sidebar(at_contrast(bg, fg, 1.15)),
+        "sidebar_bg":  _tinted_sidebar(at_contrast(bg, fg, 1.15), accent),
         "surface0":    at_contrast(bg, fg, 1.25),
         # surface1 doubles as the INACTIVE pane border. Held deliberately low so
         # the gap to `accent` (the active border) is wide: at 1.9 the light
         # theme separated active from inactive by only 2.4x, versus 8x on dark,
         # which made the focused pane hard to spot. See ACTIVE_MIN below.
-        "surface1":    _tinted_surface(at_contrast(bg, fg, 1.55), bg),
+        "surface1":    _tinted_surface(at_contrast(bg, fg, 1.55), bg, accent),
         "surface_dim": at_contrast(bg, fg, 1.08),
         "overlay0":    at_contrast(bg, fg, 4.5),
         "overlay1":    at_contrast(bg, fg, 6.0),
