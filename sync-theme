@@ -37,11 +37,14 @@ for sock in /tmp/kitty-*(=N); do
     "$kitty_bin" @ --to "unix:$sock" load-config >/dev/null 2>&1
 done
 
-# Mirror the kitty palette into herdr's [theme.custom] block and hot-reload it.
+# Keep herdr's mode-specific custom palettes in sync with the kitty themes.
 #
-# herdr's own theme.auto_switch only picks between built-in themes, so matching
-# these colors means rewriting the custom block per mode. herdr-theme edits only
-# its own marker-delimited section, leaving keybindings and plugin config alone.
+# herdr supports [theme.custom.light] and [theme.custom.dark], so herdr-theme
+# writes both palettes at once and normalizes [theme] to auto-switch them.
+# auto_switch selects between them from terminal appearance; this call also
+# regenerates the palettes in case a kitty theme was edited.
+# herdr-theme edits only its own marker-delimited section, leaving keybindings
+# and plugin config alone.
 # Both steps are best-effort: a missing herdr must not break the kitty switch.
 #
 # Resolve herdr by absolute path, NOT via `command -v`. Hammerspoon triggers
@@ -55,7 +58,7 @@ done
 [[ -z "$herdr_bin" ]] && herdr_bin="$(command -v herdr 2>/dev/null)"
 
 if [[ -n "$herdr_bin" && -f "$HOME/.config/herdr/config.toml" ]]; then
-    if "$script_dir/herdr-theme" "$mode" >/dev/null 2>&1; then
+    if "$script_dir/herdr-theme" >/dev/null 2>&1; then
         "$herdr_bin" server reload-config >/dev/null 2>&1
     fi
 fi
