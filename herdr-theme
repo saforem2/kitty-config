@@ -360,10 +360,9 @@ def build_palette(mode):
         src_raw = ""
     accent = deepen(legible(tinted), src_raw, bg, fg, ACTIVE_MIN)
 
-    # active_row_bg is the active Space / focused Agent row. Keep this at the
-    # stronger 1.55 cue even though the light theme's inactive pane border is
-    # intentionally dimmer below; sidebar selection and pane focus are distinct
-    # roles and no longer need to share one token value.
+    # active_row_bg is the active Space / focused Agent row. It is the same
+    # role surface1 fills elsewhere, so it reuses that exact value -- one visual
+    # language for "this is focused" across sidebar and content surfaces.
     active_row_bg = _tinted_surface(at_contrast(bg, fg, 1.55), bg, accent)
     # selection_bg is only the Navigate-mode cursor row, which sits ON the
     # sidebar and moves while the active row stays put. Deliberately quieter
@@ -390,14 +389,15 @@ def build_palette(mode):
         # surface0, and the active row would stop lifting off the sidebar.
         "sidebar_bg":  _tinted_sidebar(at_contrast(bg, fg, 1.15), accent),
         "surface0":    at_contrast(bg, fg, 1.25),
-        # surface1 is Herdr's INACTIVE pane-border token. The light theme needs
-        # a quieter edge than the active sidebar row: 1.15 stays visible on
-        # white but recedes behind the 4.5:1 accent border. Keep dark at 1.55;
-        # against a near-black panel, dimming it further makes pane geometry
-        # disappear instead of improving focus.
-        "surface1":    _tinted_surface(at_contrast(bg, fg, 1.15 if mode == "light" else 1.55), bg, accent),
+        # Pane borders do NOT use surface1: Herdr's renderer uses overlay0 for
+        # inactive borders/titles and accent for focused ones. Keep surface1 as
+        # the stronger content/sidebar surface; dim overlay0 separately below.
+        "surface1":    _tinted_surface(at_contrast(bg, fg, 1.55), bg, accent),
         "surface_dim": at_contrast(bg, fg, 1.08),
-        "overlay0":    at_contrast(bg, fg, 4.5),
+        # Inactive pane border/title token. On light, 1.55:1 is visibly muted
+        # against white while remaining easy to trace; active accent is 4.54:1.
+        # Dark keeps WCAG-readable overlay text at 4.5:1.
+        "overlay0":    at_contrast(bg, fg, 1.55 if mode == "light" else 4.5),
         "overlay1":    at_contrast(bg, fg, 6.0),
         "text":        fg,
         "subtext0":    at_contrast(bg, fg, sub_target),
