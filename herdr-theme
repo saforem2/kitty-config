@@ -21,14 +21,24 @@ Catppuccin-flavoured; a token not in this list is silently ignored by herdr
 import argparse
 import os
 import re
+import subprocess
 import sys
 
 # realpath: this script is also symlinked into ~/.config/kitty, and abspath
 # would not resolve that, leaving kitty_colors unimportable from the link.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from kitty_colors import (  # noqa: E402
-    at_contrast, contrast, deepen, hex_to_oklch, legible as _legible, _lum,
-    load_kitty_theme, mix, oklch_to_hex,
+    _lum,
+    at_contrast,
+    contrast,
+    deepen,
+    hex_to_oklch,
+    load_kitty_theme,
+    mix,
+    oklch_to_hex,
+)
+from kitty_colors import (
+    legible as _legible,
 )
 
 # Optional per-machine sidebar tint. Set HERDR_SIDEBAR_TINT to one of these
@@ -40,22 +50,22 @@ from kitty_colors import (  # noqa: E402
 # The tint is applied AFTER the 1.06 contrast step and is deliberately weak,
 # so the sidebar still reads as chrome rather than as a coloured panel.
 SIDEBAR_TINTS = {
-    "amber":  "#ff9d00",
-    "teal":   "#00b3a4",
+    "amber": "#ff9d00",
+    "teal": "#00b3a4",
     "violet": "#8260cc",
-    "rose":   "#db2587",
-    "green":  "#1e8759",
-    "blue":   "#327abc",
+    "rose": "#db2587",
+    "green": "#1e8759",
+    "blue": "#327abc",
     # sky is a lighter, greener blue than `blue`. Against `violet` it is the
     # one that reads clearly different: violet leaves G just below R, sky
     # pushes G well above it, so the G-vs-R relationship flips rather than
     # both just looking "cool".
-    "sky":    "#3fa9f5",
+    "sky": "#3fa9f5",
     # mint is a light, slightly cool green. Against `violet` it is the
     # strongest pairing available here: violet keeps B above G, mint pushes G
     # above B, so the blue-vs-green relationship inverts rather than the two
     # merely differing in lightness.
-    "mint":   "#3ddc97",
+    "mint": "#3ddc97",
 }
 # How far sidebar_bg is mixed toward the tint hue. Overridable per machine with
 # HERDR_SIDEBAR_TINT_STRENGTH so two tinted hosts can differ in intensity as
@@ -264,7 +274,9 @@ def _tinted_sidebar(base, accent):
         L_base, _, _ = hex_to_oklch(base)
         hue = oklch_to_hex(L_base, c_accent, H_acc)
     else:
-        hue = SIDEBAR_TINTS.get(raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None)
+        hue = SIDEBAR_TINTS.get(
+            raw, raw if re.fullmatch(r"#[0-9a-f]{6}", raw) else None
+        )
     if hue is None:
         sys.exit(
             f"herdr-theme: unknown HERDR_SIDEBAR_TINT {raw!r}; expected 'accent', "
@@ -275,12 +287,17 @@ def _tinted_sidebar(base, accent):
         try:
             strength = float(raw_strength)
         except ValueError:
-            sys.exit(f"herdr-theme: HERDR_SIDEBAR_TINT_STRENGTH must be a number, got {raw_strength!r}")
+            sys.exit(
+                f"herdr-theme: HERDR_SIDEBAR_TINT_STRENGTH must be a number, got {raw_strength!r}"
+            )
         if not 0.0 <= strength <= 1.0:
-            sys.exit(f"herdr-theme: HERDR_SIDEBAR_TINT_STRENGTH must be in [0, 1], got {strength}")
+            sys.exit(
+                f"herdr-theme: HERDR_SIDEBAR_TINT_STRENGTH must be in [0, 1], got {strength}"
+            )
     else:
         strength = SIDEBAR_TINT_STRENGTH
     return mix(base, hue, strength)
+
 
 # herdr's CustomThemeColors fields, in declaration order.
 #
@@ -290,14 +307,59 @@ def _tinted_sidebar(base, accent):
 # instead of our derived surfaces, which is why the active-row cue did not
 # track the rest of the palette.
 TOKENS = [
-    "accent", "panel_bg", "sidebar_bg", "active_row_bg", "selection_bg",
-    "surface0", "surface1", "surface_dim",
-    "overlay0", "overlay1", "text", "subtext0", "mauve", "green",
-    "yellow", "red", "blue", "teal", "peach",
+    "accent",
+    "panel_bg",
+    "sidebar_bg",
+    "active_row_bg",
+    "selection_bg",
+    "surface0",
+    "surface1",
+    "surface_dim",
+    "overlay0",
+    "overlay1",
+    "text",
+    "subtext0",
+    "mauve",
+    "green",
+    "yellow",
+    "red",
+    "blue",
+    "teal",
+    "peach",
 ]
 
 BEGIN = "# >>> kitty-sync >>>"
 END = "# <<< kitty-sync <<<"
+
+# The Agent Activity plugin originally wrote Catppuccin literals into the
+# expanded Agents rows. Inline row styles override the renderer's Palette, so
+# those colors otherwise stay fixed while the rest of Herdr follows Kitty.
+# Restrict replacement to [ui.sidebar.agents]; the Spaces layout can have its
+# own authored colors and must remain untouched.
+AGENT_SIDEBAR_COLOR_PATTERNS = {
+    r'(token\s*=\s*"\$cache_high"\s*,\s*fg\s*=\s*")[^"]+': "green",
+    r'(token\s*=\s*"\$cache_mid"\s*,\s*fg\s*=\s*")[^"]+': "yellow",
+    r'(token\s*=\s*"\$cache_low"\s*,\s*fg\s*=\s*")[^"]+': "red",
+    r'(token\s*=\s*"\$rsact_summary"\s*,\s*fg\s*=\s*")[^"]+': "blue",
+    r'(contains\s*=\s*"subagent"\s*,\s*fg\s*=\s*")[^"]+': "yellow",
+    r'(contains\s*=\s*"(?:bg|monitor)"\s*,\s*fg\s*=\s*")[^"]+': "blue",
+    r'(starts_with\s*=\s*"(?:loop|next)"\s*,\s*fg\s*=\s*")[^"]+': "mauve",
+}
+
+
+def configure_agent_sidebar_colors(text, palette):
+    """Replace known plugin color literals with the active Kitty palette."""
+    match = re.search(
+        r"(?ms)^\[ui\.sidebar\.agents\]\s*\n(.*?)(?=^\[(?!ui\.sidebar\.agents(?:\.|\]))|\Z)",
+        text,
+    )
+    if not match:
+        return text
+
+    body = match.group(1)
+    for pattern, role in AGENT_SIDEBAR_COLOR_PATTERNS.items():
+        body = re.sub(pattern, rf"\g<1>{palette[role]}", body)
+    return text[: match.start(1)] + body + text[match.end(1) :]
 
 
 def build_palette(mode):
@@ -306,7 +368,9 @@ def build_palette(mode):
     required = ["background", "foreground", "active_border_color"]
     missing = [r for r in required if r not in k]
     if missing:
-        sys.exit(f"herdr-theme: {mode} theme missing required keys: {', '.join(missing)}")
+        sys.exit(
+            f"herdr-theme: {mode} theme missing required keys: {', '.join(missing)}"
+        )
 
     def c(name, fallback):
         return k.get(name, k.get(fallback, "#808080"))
@@ -371,10 +435,10 @@ def build_palette(mode):
     selection_bg = at_contrast(bg, fg, 1.25)
 
     return {
-        "accent":        accent,
+        "accent": accent,
         "active_row_bg": active_row_bg,
-        "selection_bg":  selection_bg,
-        "panel_bg":    bg,
+        "selection_bg": selection_bg,
+        "panel_bg": bg,
         # sidebar_bg: recessed relative to the panel so the spaces list reads as
         # chrome rather than content. On dark that means slightly lighter than
         # the near-black bg (pure-black-on-black is invisible); on light,
@@ -387,27 +451,27 @@ def build_palette(mode):
         # #282828 (1.16:1): still clearly chrome, but the edge is findable.
         # Do not raise this to 1.25 -- that resolves to #2e2e2e on dark, exactly
         # surface0, and the active row would stop lifting off the sidebar.
-        "sidebar_bg":  _tinted_sidebar(at_contrast(bg, fg, 1.15), accent),
-        "surface0":    at_contrast(bg, fg, 1.25),
+        "sidebar_bg": _tinted_sidebar(at_contrast(bg, fg, 1.15), accent),
+        "surface0": at_contrast(bg, fg, 1.25),
         # Pane borders do NOT use surface1: Herdr's renderer uses overlay0 for
         # inactive borders/titles and accent for focused ones. Keep surface1 as
         # the stronger content/sidebar surface; dim overlay0 separately below.
-        "surface1":    _tinted_surface(at_contrast(bg, fg, 1.55), bg, accent),
+        "surface1": _tinted_surface(at_contrast(bg, fg, 1.55), bg, accent),
         "surface_dim": at_contrast(bg, fg, 1.08),
         # Inactive pane border/title token. On light, 1.55:1 is visibly muted
         # against white while remaining easy to trace; active accent is 4.54:1.
         # Dark keeps WCAG-readable overlay text at 4.5:1.
-        "overlay0":    at_contrast(bg, fg, 1.55 if mode == "light" else 4.5),
-        "overlay1":    at_contrast(bg, fg, 6.0),
-        "text":        fg,
-        "subtext0":    at_contrast(bg, fg, sub_target),
-        "mauve":       legible(c("color5", "color13")),
-        "green":       legible(c("color2", "color10")),
-        "yellow":      legible(c("color3", "color11")),
-        "red":         legible(c("color1", "color9")),
-        "blue":        legible(c("color4", "color12")),
-        "teal":        legible(c("color6", "color14")),
-        "peach":       legible(c("color11", "color3")),
+        "overlay0": at_contrast(bg, fg, 1.55 if mode == "light" else 4.5),
+        "overlay1": at_contrast(bg, fg, 6.0),
+        "text": fg,
+        "subtext0": at_contrast(bg, fg, sub_target),
+        "mauve": legible(c("color5", "color13")),
+        "green": legible(c("color2", "color10")),
+        "yellow": legible(c("color3", "color11")),
+        "red": legible(c("color1", "color9")),
+        "blue": legible(c("color4", "color12")),
+        "teal": legible(c("color6", "color14")),
+        "peach": legible(c("color11", "color3")),
     }
 
 
@@ -446,11 +510,11 @@ def configure_theme(text):
         if pattern.search(body):
             body = pattern.sub(rf"\g<1>{value}", body, count=1)
         else:
-            body += f'{key} = {value}\n'
-    return text[:match.start(1)] + body + text[match.end(1):]
+            body += f"{key} = {value}\n"
+    return text[: match.start(1)] + body + text[match.end(1) :]
 
 
-def apply(config_path, palettes, do_print):
+def apply(config_path, palettes, active_mode, do_print):
     block = render_block(palettes)
     if do_print:
         print(block)
@@ -458,13 +522,14 @@ def apply(config_path, palettes, do_print):
 
     if not os.path.exists(config_path):
         sys.exit(f"herdr-theme: no config at {config_path}")
-    text = open(config_path, encoding="utf-8").read()
+    with open(config_path, encoding="utf-8") as fh:
+        original = fh.read()
+    text = original
     text = configure_theme(text)
+    text = configure_agent_sidebar_colors(text, palettes[active_mode])
 
     # Replace our managed block if present, else append it.
-    pattern = re.compile(
-        re.escape(BEGIN) + r".*?" + re.escape(END), re.S
-    )
+    pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.S)
     if pattern.search(text):
         new = pattern.sub(lambda _: block, text)
     else:
@@ -476,7 +541,7 @@ def apply(config_path, palettes, do_print):
             )
         new = text.rstrip("\n") + "\n\n" + block + "\n"
 
-    if new == text:
+    if new == original:
         return False
     tmp = config_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -490,14 +555,34 @@ def main():
     # Kept as an optional compatibility argument because sync-theme historically
     # called `herdr-theme light|dark`. Both palettes are now always generated.
     ap.add_argument("mode", nargs="?", choices=["dark", "light"])
-    ap.add_argument("--config",
-                    default=os.path.expanduser("~/.config/herdr/config.toml"))
-    ap.add_argument("--print", dest="do_print", action="store_true",
-                    help="print the block instead of writing it")
+    ap.add_argument(
+        "--config", default=os.path.expanduser("~/.config/herdr/config.toml")
+    )
+    ap.add_argument(
+        "--print",
+        dest="do_print",
+        action="store_true",
+        help="print the block instead of writing it",
+    )
     args = ap.parse_args()
 
     palettes = {mode: build_palette(mode) for mode in ("light", "dark")}
-    changed = apply(args.config, palettes, args.do_print)
+    if args.mode:
+        active_mode = args.mode
+    elif os.environ.get("HERDR_THEME_MODE", "").lower() in {"light", "dark"}:
+        active_mode = os.environ["HERDR_THEME_MODE"].lower()
+    else:
+        try:
+            result = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            active_mode = "dark" if result.stdout.strip() == "Dark" else "light"
+        except OSError:
+            active_mode = "light"
+    changed = apply(args.config, palettes, active_mode, args.do_print)
     if changed:
         print("herdr-theme: applied light/dark palettes")
 

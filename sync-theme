@@ -58,7 +58,7 @@ done
 [[ -z "$herdr_bin" ]] && herdr_bin="$(command -v herdr 2>/dev/null)"
 
 if [[ -n "$herdr_bin" && -f "$HOME/.config/herdr/config.toml" ]]; then
-    if "$script_dir/herdr-theme" >/dev/null 2>&1; then
+    if HERDR_THEME_MODE="$mode" "$script_dir/herdr-theme" >/dev/null 2>&1; then
         "$herdr_bin" server reload-config >/dev/null 2>&1
     fi
 fi
