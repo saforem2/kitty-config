@@ -54,6 +54,35 @@ rows = [[{ token = "$ai_usage", fg = "#a6e3a1" }]]
         self.assertNotIn("#a6e3a1", agent_section)
         self.assertIn('fg = "#a6e3a1"', updated.split("[ui.sidebar.spaces]", 1)[1])
 
+    def test_spaces_sidebar_custom_tokens_follow_active_palette(self):
+        text = """before
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  ["branch", "git_status"],
+  [{ token = "$rsact_summary", fg = "#89b4fa", rules = [{ contains = "subagent", fg = "#f9e2af" }, { contains = "bg", fg = "#89b4fa" }, { contains = "monitor", fg = "#89b4fa" }, { starts_with = "loop", fg = "#cba6f7" }, { starts_with = "next", fg = "#cba6f7" }] }],
+]
+"""
+        palette = {
+            "subtext0": "#5f6179",
+            "green": "#1e8759",
+            "yellow": "#976e4a",
+            "blue": "#327abc",
+            "mauve": "#8260cc",
+        }
+
+        updated = self.module.configure_spaces_sidebar_colors(text, palette)
+
+        self.assertIn('{ token = "branch", fg = "#5f6179" }', updated)
+        self.assertIn('{ token = "git_status", fg = "#1e8759" }', updated)
+        self.assertIn('token = "$rsact_summary", fg = "#327abc"', updated)
+        self.assertIn('contains = "subagent", fg = "#976e4a"', updated)
+        self.assertIn('starts_with = "loop", fg = "#8260cc"', updated)
+        self.assertNotIn("#89b4fa", updated)
+        self.assertEqual(
+            self.module.configure_spaces_sidebar_colors(updated, palette), updated
+        )
+
     def test_rewrite_is_idempotent_and_switches_modes(self):
         text = """[ui.sidebar.agents]
 rows = [[{ token = "$cache_high", fg = "#a6e3a1" }, { token = "$cache_mid", fg = "#f9e2af" }, { token = "$cache_low", fg = "#f38ba8" }]]

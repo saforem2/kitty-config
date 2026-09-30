@@ -362,6 +362,37 @@ def configure_agent_sidebar_colors(text, palette):
     return text[: match.start(1)] + body + text[match.end(1) :]
 
 
+SPACES_SIDEBAR_COLOR_PATTERNS = {
+    r'(token\s*=\s*"\$rsact_summary"\s*,\s*fg\s*=\s*")[^"]+': "blue",
+    r'(contains\s*=\s*"subagent"\s*,\s*fg\s*=\s*")[^"]+': "yellow",
+    r'(contains\s*=\s*"(?:bg|monitor)"\s*,\s*fg\s*=\s*")[^"]+': "blue",
+    r'(starts_with\s*=\s*"(?:loop|next)"\s*,\s*fg\s*=\s*")[^"]+': "mauve",
+}
+
+
+def configure_spaces_sidebar_colors(text, palette):
+    """Use the active Kitty palette for Spaces metadata and activity rows."""
+    match = re.search(
+        r"(?ms)^\[ui\.sidebar\.spaces\]\s*\n(.*?)(?=^\[(?!ui\.sidebar\.spaces(?:\.|\]))|\Z)",
+        text,
+    )
+    if not match:
+        return text
+
+    body = match.group(1)
+    # Bare tokens inherit Herdr's very faint defaults. Explicit roles keep the
+    # branch readable and the ahead/behind marker semantic in light mode.
+    body = re.sub(
+        r'(?m)^\s*\["branch",\s*"git_status"\],\s*$',
+        '  [{ token = "branch", fg = "' + palette["subtext0"] + '" }, '
+        '{ token = "git_status", fg = "' + palette["green"] + '" }],',
+        body,
+    )
+    for pattern, role in SPACES_SIDEBAR_COLOR_PATTERNS.items():
+        body = re.sub(pattern, rf"\g<1>{palette[role]}", body)
+    return text[: match.start(1)] + body + text[match.end(1) :]
+
+
 def build_palette(mode):
     """Map kitty color roles onto herdr's token names."""
     k = load_kitty_theme(mode, "herdr-theme")
@@ -527,6 +558,7 @@ def apply(config_path, palettes, active_mode, do_print):
     text = original
     text = configure_theme(text)
     text = configure_agent_sidebar_colors(text, palettes[active_mode])
+    text = configure_spaces_sidebar_colors(text, palettes[active_mode])
 
     # Replace our managed block if present, else append it.
     pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.S)
