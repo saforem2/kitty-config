@@ -6,3 +6,6 @@
 	path = kitty_search
 	url = https://github.com/saforem2/kitty-kitten-search.git
 	branch = sam/local-changes
+[submodule "kitty_grab"]
+	url = https://github.com/yurikhan/kitty_grab.git
+	path = kitty_grab
