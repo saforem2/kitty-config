@@ -1,0 +1,463 @@
+#!/usr/bin/env python3
+"""Generate a leaf custom theme mirroring the kitty light/dark theme.
+
+Usage: leaf-theme {dark|light} [--out PATH] [--print]
+       leaf-theme --check
+
+leaf (https://github.com/RivoLink/leaf) is a terminal markdown viewer whose
+themes are standalone TOML files: a `base` preset name, a `syntax` set, and
+[ui] / [markdown] tables of hex colors. We override EVERY key leaf knows about
+so nothing bleeds through from `base`.
+
+Colors come from themes/theme-{mode}.conf via kitty_colors, which converts the
+OKLCH source to hex. Two rules shape the mapping:
+
+  * Greys (borders, gutters, chrome fills) are DERIVED with at_contrast(),
+    never lifted from kitty's ANSI palette -- ANSI 'bright black' sits at
+    ~1.2:1 against the background and vanishes.
+
+  * Hues used as TEXT are deepened until they clear WCAG AA against the
+    surface they are actually drawn on. leaf paints headings, links and alerts
+    as text, and on the light theme (pure white bg) kitty's color3 measures
+    ~2.2:1 -- illegible. The deepening walks OKLCH lightness while holding
+    chroma and hue, so the color stays vivid; blending toward the near-grey
+    foreground instead turned red into brown. Close to a no-op on dark.
+
+`--check` verifies the key lists below still match the installed leaf binary,
+so a leaf upgrade that adds a theme key cannot silently leave it at its (dark)
+built-in default.
+"""
+
+import argparse
+import os
+import re
+import sys
+
+# realpath: this script is also symlinked into ~/.config/kitty, and abspath
+# would not resolve that, leaving kitty_colors unimportable from the link.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from kitty_colors import (  # noqa: E402
+    at_contrast, contrast, deepen, legible as _legible, load_kitty_theme, mix,
+)
+
+# leaf's UiThemeOverrides fields, in the binary's declaration order.
+UI_KEYS = [
+    "toc_bg", "toc_border", "content_bg", "scrollbar_hover", "status_bg",
+    "status_separator", "status_brand_fg", "status_brand_bg",
+    "status_filename_fg", "status_filename_bg", "status_watch_fg",
+    "status_watch_bg", "status_reloaded_fg", "status_reloaded_bg",
+    "status_search_fg", "status_search_bg", "status_success_fg",
+    "status_success_bg", "status_warning_fg", "status_error_fg",
+    "status_error_bg", "status_shortcut_fg", "status_percent_fg",
+    "toc_hover_fg", "toc_header_fg", "toc_active_bg", "toc_inactive_bg",
+    "toc_accent", "toc_index_inactive", "toc_primary_active",
+    "toc_primary_inactive", "toc_secondary_inactive",
+    "toc_secondary_text_active", "toc_secondary_text_inactive",
+]
+
+# leaf's MarkdownThemeOverrides fields, in the binary's declaration order.
+MD_KEYS = [
+    "search_highlight_bg", "search_match_bg", "code_gutter",
+    "blockquote_marker", "list_level_1", "list_level_2", "list_level_3",
+    "ordered_list", "table_border", "table_separator", "table_header",
+    "table_cell", "heading_1", "heading_2", "heading_3", "heading_4",
+    "heading_other", "heading_underline", "code_frame", "code_label",
+    "inline_code_fg", "inline_code_bg", "rule", "link_icon", "link_text",
+    "link_hover", "blockquote_text", "text", "strong_text",
+    "latex_inline_fg", "latex_inline_bg", "latex_block_fg",
+    "mermaid_keyword", "mermaid_arrow", "mermaid_label", "mermaid_block_fg",
+    "mark_fg", "mark_bg", "task_checked", "task_unchecked", "alert_note",
+    "alert_tip", "alert_important", "alert_warning", "alert_caution",
+    "footnote_ref", "footnote_text",
+]
+
+# What follows each struct's concatenated field names in the binary. Used by
+# --check to tell "our list ends where the struct ends" from "upstream appended
+# a key we do not emit". Captured from leaf 1.28.0; if a future build changes
+# the adjacent string, --check reports a spurious new key rather than going
+# quiet -- the safe direction.
+TAIL_SENTINELS = ("redgreentheme", "CustomThemeConfig", "MarkdownThemeOverrides")
+
+# Syntect sets bundled in the leaf binary. Anything else is rejected at load.
+SYNTAX = {"dark": "base16-ocean.dark", "light": "InspiredGitHub"}
+
+# leaf resolves `base` to a built-in preset, then applies our overrides on top.
+# All four built-ins (arctic, forest, ocean, solarized-dark) are dark-polarity,
+# so there is no light base to pick -- and it does not matter, because we
+# override every key leaf defines. `base` only governs anything a future leaf
+# release adds before this script learns about it -- `leaf-theme --check` scans
+# the installed binary and reports that drift.
+BASE = {"dark": "ocean", "light": "ocean"}
+
+# Any hue drawn as text clears WCAG AA. Headings sit a notch above that, so a
+# heading never reads as fainter than the paragraph under it.
+TEXT_MIN = 4.5
+HEADING_MIN = 5.5
+
+
+def check_keys():
+    """Compare UI_KEYS/MD_KEYS against the installed leaf binary.
+
+    leaf embeds its serde field names as literal strings, so the struct markers
+    below are followed by the exact key list. A leaf upgrade that adds a theme
+    key would otherwise pass silently -- the new key just keeps its `base`
+    default, which on a light terminal means a dark-theme color.
+    """
+    import shutil
+    binary = shutil.which("leaf")
+    if not binary:
+        print("leaf-theme --check: leaf not on PATH, skipping")
+        return 0
+
+    blob = open(binary, "rb").read()
+    ok = True
+    for label, marker, known in (
+        ("ui", b"UiThemeOverrides", UI_KEYS),
+        ("markdown", b"MarkdownThemeOverrides", MD_KEYS),
+    ):
+        i = blob.find(marker)
+        if i < 0:
+            print(f"leaf-theme --check: {marker.decode()} not found in {binary}")
+            ok = False
+            continue
+        # The field names run contiguously after the marker; walk the known
+        # list through that window and report the first key that is absent.
+        window = blob[i:i + 4096].decode("latin-1")
+        missing = [key for key in known if key not in window]
+        if missing:
+            print(f"leaf-theme --check: [{label}] we emit unknown keys: {missing}")
+            ok = False
+        # Detect ADDED upstream keys by span, not by tokenizing: leaf stores
+        # the field names concatenated with no separators, so any word-splitting
+        # of the tail just yields fragments of neighbouring strings. The whole
+        # concatenation should sit flush against the marker -- comparing from
+        # the marker (rather than from our first key) is what catches an insert
+        # at the START of the list.
+        joined = "".join(known)
+        anchored = window[len(marker):len(marker) + len(joined)]
+        gaps = []
+        if anchored != joined:
+            pos = len(marker)
+            for idx, key in enumerate(known):
+                j = window.find(key, pos)
+                if j < 0:
+                    break
+                if j > pos:
+                    prev = known[idx - 1] if idx else f"<start of {marker.decode()}>"
+                    gaps.append((prev, window[pos:j], key))
+                pos = j + len(key)
+        else:
+            pos = len(marker) + len(joined)
+
+        # An insert AFTER the final key leaves no gap between two known keys and
+        # keeps the anchored prefix intact, so it is invisible to both checks
+        # above -- and it is the LIKELY case, since serde field order follows
+        # struct declaration order and new fields are usually appended. Read the
+        # tail directly. The trailing sentinel differs per struct, so match
+        # against the known continuation rather than "any word".
+        tail = window[pos:pos + 64]
+        for sentinel in TAIL_SENTINELS:
+            if tail.startswith(sentinel):
+                break
+        else:
+            m2 = re.match(r"[a-z][a-z0-9_]*", tail)
+            if m2:
+                gaps.append((known[-1], m2.group(0), "<end of list>"))
+
+        for prev, gap, nxt in gaps[:5]:
+            print(f"leaf-theme --check: [{label}] NEW key(s) between "
+                  f"{prev!r} and {nxt!r}: {gap!r}")
+        if gaps:
+            ok = False
+    if ok:
+        print(f"leaf-theme --check: {len(UI_KEYS)} ui + {len(MD_KEYS)} markdown "
+              f"keys all present in {binary}")
+    return 0 if ok else 1
+
+
+def build_palette(mode):
+    """Map kitty color roles onto leaf's [ui] and [markdown] keys."""
+    k = load_kitty_theme(mode, "leaf-theme")
+    required = ["background", "foreground", "active_border_color"]
+    missing = [r for r in required if r not in k]
+    if missing:
+        sys.exit(f"leaf-theme: {mode} theme missing required keys: {', '.join(missing)}")
+
+    bg, fg = k["background"], k["foreground"]
+
+    def on(color, panel, target=TEXT_MIN, raw=""):
+        """Deepen `color` until it is readable ON `panel`.
+
+        The panel matters: the TOC/status strip and the tinted status chips are
+        each a shade off `content_bg`, and a color tuned against the content
+        panel lands just under AA on them (measured 4.21-4.35:1). Every color
+        is therefore deepened against the surface it is actually drawn on.
+
+        deepen() walks OKLCH lightness while holding chroma and hue, so the
+        color stays vivid. The blend-toward-fg fallback desaturates badly --
+        on the light theme it turned red into a brown (#986873) -- so it only
+        runs when deepen() cannot reach the target at any lightness.
+        """
+        out = deepen(color, raw, panel, fg, target)
+        return out if contrast(out, panel) >= target else _legible(out, panel, fg, target)
+
+    def hue(name, fallback, target=TEXT_MIN, panel=None):
+        """A kitty ANSI color, deepened until readable as text on `panel`."""
+        raw = k.get("__raw__" + name) or k.get("__raw__" + fallback, "")
+        return on(k.get(name, k.get(fallback, "#808080")),
+                  panel if panel is not None else bg, target, raw)
+
+    # --- derived neutrals -------------------------------------------------
+    # chrome  : the TOC / status strip, recessed just off the content panel.
+    # hairline: table separators and heading underlines -- visible, not loud.
+    # rule    : horizontal rules and code frames, one step stronger.
+    # muted   : the faintest text we still expect to be READ (WCAG AA).
+    chrome = at_contrast(bg, fg, 1.06)
+    raised = at_contrast(bg, fg, 1.25)
+    hairline = at_contrast(bg, fg, 1.55)
+    rule = at_contrast(bg, fg, 2.2)
+    muted = at_contrast(bg, fg, TEXT_MIN)
+    secondary = at_contrast(bg, fg, 6.0)
+    # Same two roles, but for text sitting on the chrome strip rather than the
+    # content panel -- chrome is ~1.06:1 off bg, enough to drop a bg-tuned grey
+    # to 4.25:1.
+    muted_chrome = at_contrast(chrome, fg, TEXT_MIN)
+    secondary_chrome = at_contrast(chrome, fg, 6.0)
+
+    # --- hues -------------------------------------------------------------
+    accent = deepen(k["active_border_color"],
+                    k.get("__raw__active_border_color", ""), bg, fg, HEADING_MIN)
+    red = hue("color1", "color9")
+    green = hue("color2", "color10")
+    yellow = hue("color3", "color11")
+    blue = hue("color4", "color12")
+    mauve = hue("color5", "color13")
+    teal = hue("color6", "color14")
+    peach = hue("color11", "color3")
+
+    # Chrome-strip variants of the status hues.
+    green_c = hue("color2", "color10", panel=chrome)
+    yellow_c = hue("color3", "color11", panel=chrome)
+    red_c = hue("color1", "color9", panel=chrome)
+
+    # Tinted fills: a hue at ~12% over the panel reads as a badge on both
+    # polarities, where a fixed dark swatch (as gruvbox.toml uses) would be a
+    # black smear on the light theme.
+    def tint(color, t=0.12, panel=None):
+        return mix(panel if panel is not None else bg, color, t)
+
+    def chip(color, t=0.12, panel=None, raw=""):
+        """(fg, bg) for a tinted badge, with the text re-checked on its fill."""
+        fill = tint(color, t, panel)
+        return on(color, fill, TEXT_MIN, raw), fill
+
+    def fill_under(text_color, color, panel=None, target=TEXT_MIN, cap=0.45):
+        """The strongest tint of `color` that `text_color` stays readable on.
+
+        For fills leaf gives NO paired _fg key -- search_match_bg is the one --
+        the text drawn over them is plain `text`, and nothing downstream can
+        compensate. So the fill has to yield instead: walk the tint back until
+        the FIXED text color clears `target`. Hardcoding a strength here is how
+        the active search hit ended up at 2.54:1 on the dark theme, the least
+        legible text on screen.
+        """
+        best = tint(color, 0.0, panel)
+        for i in range(1, int(cap * 100) + 1):
+            cand = tint(color, i / 100, panel)
+            if contrast(text_color, cand) < target:
+                break
+            best = cand
+        return best
+
+    # strong_text must out-contrast body text or bold reads as *weaker*.
+    # color15 is pure white on the dark theme (perfect), but a mid grey on the
+    # light theme -- 2.4:1, far below the 8:1 body text. at_contrast() cannot
+    # help: it blends bg toward fg and so tops out AT fg. Push past fg toward
+    # the extreme instead.
+    strong = k.get("color15", fg)
+    if contrast(strong, bg) <= contrast(fg, bg):
+        # Target a RATIO, not a fixed blend. A fixed mix toward the extreme
+        # gives a boost proportional to how far fg already sits from it: fine
+        # here (7.99 -> 13.95), but on a theme with a near-black fg it yields
+        # +1.03, and at fg = #000000 it is a literal no-op -- silently breaking
+        # the "bold out-contrasts body" invariant this block exists to hold.
+        extreme = "#000000" if contrast("#000000", bg) > contrast("#ffffff", bg) else "#ffffff"
+        want = min(contrast(fg, bg) * 1.4, contrast(extreme, bg))
+        strong = at_contrast(bg, extreme, want)
+        # at_contrast tops out at `extreme`; if fg is already there, nothing can
+        # out-contrast it and bold falls back to plain text rather than lying.
+        if contrast(strong, bg) <= contrast(fg, bg):
+            strong = fg
+
+    accent_chrome = on(accent, chrome, HEADING_MIN,
+                       k.get("__raw__active_border_color", ""))
+
+    # Markdown chips: fg re-deepened against its own tinted fill.
+    code_fg, code_bg = chip(peach, 0.14)
+    latex_fg, latex_bg = chip(mauve, 0.14)
+    # ==highlight== is a strong yellow wash, so the text on it needs to go
+    # further than `fg`: on() deepens TOWARD fg and therefore cannot move a
+    # color that already is fg. Drive it to the extreme instead -- the same
+    # problem, and the same fix, as strong_text above.
+    mark_bg = tint(yellow, 0.35)
+    mark_fg = at_contrast(mark_bg,
+                          "#000000" if contrast("#000000", mark_bg) >
+                                       contrast("#ffffff", mark_bg) else "#ffffff",
+                          TEXT_MIN)
+
+    # Status chips: text re-deepened against its own tinted fill.
+    watch_fg, watch_bg = chip(green_c, panel=chrome)
+    search_fg, search_bg = chip(yellow_c, panel=chrome)
+    error_fg, error_bg = chip(red_c, panel=chrome)
+
+    ui = {
+        "toc_bg": chrome,
+        "toc_border": hairline,
+        "content_bg": bg,
+        "scrollbar_hover": accent_chrome,
+        "status_bg": chrome,
+        "status_separator": muted_chrome,
+        # Brand chip: accent fill, panel-colored text punched out of it.
+        "status_brand_fg": bg,
+        "status_brand_bg": accent,
+        "status_filename_fg": fg,
+        "status_filename_bg": raised,
+        "status_watch_fg": watch_fg,
+        "status_watch_bg": watch_bg,
+        "status_reloaded_fg": bg,
+        "status_reloaded_bg": green_c,
+        "status_search_fg": search_fg,
+        "status_search_bg": search_bg,
+        "status_success_fg": watch_fg,
+        "status_success_bg": watch_bg,
+        "status_warning_fg": yellow_c,
+        "status_error_fg": error_fg,
+        "status_error_bg": error_bg,
+        "status_shortcut_fg": muted_chrome,
+        "status_percent_fg": accent_chrome,
+        "toc_hover_fg": strong,
+        "toc_header_fg": muted_chrome,
+        "toc_active_bg": raised,
+        "toc_inactive_bg": chrome,
+        "toc_accent": accent_chrome,
+        "toc_index_inactive": muted_chrome,
+        "toc_primary_active": strong,
+        "toc_primary_inactive": fg,
+        "toc_secondary_inactive": muted_chrome,
+        "toc_secondary_text_active": fg,
+        "toc_secondary_text_inactive": secondary_chrome,
+    }
+
+    markdown = {
+        "search_highlight_bg": raised,
+        "search_match_bg": fill_under(fg, yellow),
+        "code_gutter": muted,
+        "blockquote_marker": accent,
+        "list_level_1": green,
+        "list_level_2": blue,
+        "list_level_3": mauve,
+        "ordered_list": yellow,
+        "table_border": rule,
+        "table_separator": hairline,
+        "table_header": accent,
+        "table_cell": fg,
+        # h1 takes the accent; the rest walk the palette so nesting depth is
+        # readable at a glance rather than by indentation alone.
+        "heading_1": accent,
+        "heading_2": hue("color2", "color10", HEADING_MIN),
+        "heading_3": hue("color4", "color12", HEADING_MIN),
+        "heading_4": hue("color5", "color13", HEADING_MIN),
+        "heading_other": hue("color11", "color3", HEADING_MIN),
+        "heading_underline": hairline,
+        "code_frame": rule,
+        "code_label": muted,
+        "inline_code_fg": code_fg,
+        "inline_code_bg": code_bg,
+        "rule": rule,
+        "link_icon": blue,
+        "link_text": blue,
+        "link_hover": teal,
+        "blockquote_text": secondary,
+        "text": fg,
+        "strong_text": strong,
+        "latex_inline_fg": latex_fg,
+        "latex_inline_bg": latex_bg,
+        "latex_block_fg": mauve,
+        "mermaid_keyword": peach,
+        "mermaid_arrow": blue,
+        "mermaid_label": green,
+        "mermaid_block_fg": fg,
+        "mark_fg": mark_fg,
+        "mark_bg": mark_bg,
+        "task_checked": green,
+        "task_unchecked": muted,
+        "alert_note": blue,
+        "alert_tip": green,
+        "alert_important": mauve,
+        "alert_warning": yellow,
+        "alert_caution": red,
+        "footnote_ref": blue,
+        "footnote_text": secondary,
+    }
+
+    return ui, markdown
+
+
+def render(mode, ui, markdown):
+    out = [
+        f"# leaf theme mirroring the kitty {mode} theme.",
+        f"# Generated by leaf-theme from themes/theme-{mode}.conf -- do not hand-edit.",
+        "# Regenerate:  kitty-config/leaf-theme {dark|light}",
+        "",
+        f'base = "{BASE[mode]}"',
+        f'syntax = "{SYNTAX[mode]}"',
+        "",
+        "[ui]",
+    ]
+    out += [f'{key} = "{ui[key]}"' for key in UI_KEYS]
+    out += ["", "[markdown]"]
+    out += [f'{key} = "{markdown[key]}"' for key in MD_KEYS]
+    return "\n".join(out) + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("mode", nargs="?", choices=["dark", "light"])
+    ap.add_argument("--check", action="store_true",
+                    help="verify our key lists against the installed leaf binary")
+    ap.add_argument("--out", help="output path (default: themes/leaf-<mode>.toml)")
+    ap.add_argument("--print", dest="do_print", action="store_true",
+                    help="print the theme instead of writing it")
+    args = ap.parse_args()
+
+    if args.check:
+        sys.exit(check_keys())
+    if not args.mode:
+        ap.error("mode is required (dark|light) unless --check is given")
+
+    ui, markdown = build_palette(args.mode)
+    text = render(args.mode, ui, markdown)
+
+    if args.do_print:
+        sys.stdout.write(text)
+        return
+
+    out = args.out or os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), "themes", f"leaf-{args.mode}.toml")
+    if os.path.exists(out) and open(out, encoding="utf-8").read() == text:
+        # Content is already current, so skip the write to keep the file (and
+        # git) untouched -- but bump the mtime, because sync-theme's staleness
+        # check compares it against the source palette. Without this, editing a
+        # palette in a way that does not change the output would leave the
+        # warning firing on every appearance change forever.
+        os.utime(out, None)
+        return
+    tmp = out + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, out)
+    print(f"leaf-theme: wrote {out}")
+
+
+if __name__ == "__main__":
+    main()
